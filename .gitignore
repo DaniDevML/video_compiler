@@ -1,0 +1,40 @@
+# ── Credentials & tokens (NEVER commit these) ──────────────────
+client_secrets.json
+yt_token.pickle
+*.pickle
+*.pkl
+
+# ── Python cache ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ── Numba JIT cache ─────────────────────────────────────────────
+*.nbi
+*.nbc
+
+# ── Virtual environments ─────────────────────────────────────────
+.venv/
+venv/
+env/
+.env
+
+# ── OS / editor noise ────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# ── Temp / build artefacts ───────────────────────────────────────
+*.tmp
+*.raw
+*.mp4
+dist/
+build/
+*.egg-info/
+
+# ── Claude Code internal ─────────────────────────────────────────
+.claude/
