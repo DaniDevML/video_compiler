@@ -1,12 +1,12 @@
 """
-Video encoder: files → H.264 video
+Video encoder (v3): files → H.264/AAC video
 
-Key optimisations vs the original:
-  • BLOCK_SIZE=4 → 16.5× more data per frame (128 640 bits vs 7 800)
-  • Batch frame generation: 32 frames at a time via two np.repeat calls
-  • Background write thread: numpy generation and ffmpeg pipe-write run in parallel
-  • Grayscale pipe: 1 byte/pixel instead of 3 (3× less I/O)
-  • Hardware-accelerated encoder (QSV → NVENC → AMF → libx264)
+v3 improvements over v2:
+  • 2-bpp Y plane + 1-bpp Cb/Cr planes → 2.5× more data per frame (40 140 bytes vs 16 080)
+  • YUV 4:2:0 piped directly to ffmpeg — all three planes carry data
+  • Audio channel (FSK steganography) embeds header for extra decode robustness
+  • C native fast path for pixel ops (run 'python native/build.py' to enable)
+  • Hardware encoder: QSV → NVENC → AMF → libx264 (unchanged)
 """
 
 import io
@@ -24,12 +24,15 @@ import numpy as np
 import imageio_ffmpeg
 
 from video_codec import (
-    BLOCK_SIZE, FRAME_WIDTH, FRAME_HEIGHT,
-    BITS_PER_FRAME, NROOTS, CHUNK_IN, MAGIC, FPS,
+    BLOCK_SIZE, FRAME_WIDTH, FRAME_HEIGHT, YUV_FRAME_BYTES,
+    BITS_PER_FRAME, BYTES_PER_FRAME,
+    NROOTS, CHUNK_IN, FPS,
     HEADER_SIZE, HEADER_REPEAT,
     pack_header, bytes_to_bits,
-    bits_to_frame, bits_to_frames_batch,
+    bits_to_yuv_frames, header_to_yuv_frame,
+    NATIVE_AVAILABLE,
 )
+import audio_codec as _ac
 
 # ---------------------------------------------------------------------------
 # Reed-Solomon encode  (galois – numba-JIT vectorised)
@@ -64,8 +67,7 @@ def _probe_hw_encoder() -> tuple:
     kw  = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
     if sys.platform == 'win32':
         kw['creationflags'] = subprocess.CREATE_NO_WINDOW
-    # 8 tiny test frames (gray)
-    payload = b'\x80' * (64 * 64 * 8)
+    payload    = b'\x80' * (64 * 64 * 8)
     candidates = [
         ('h264_qsv',   ['-preset', 'veryfast', '-global_quality', '18', '-g', '1']),
         ('h264_nvenc', ['-rc', 'constqp', '-qp', '18', '-g', '1', '-bf', '0']),
@@ -83,7 +85,6 @@ def _probe_hw_encoder() -> tuple:
                 return codec, params
         except Exception:
             pass
-    # Software fallback
     return ('libx264',
             ['-crf', '20', '-preset', 'ultrafast', '-g', '1',
              '-movflags', '+faststart', '-threads', '0'])
@@ -116,7 +117,6 @@ def create_archive(paths: list) -> bytes:
 # ---------------------------------------------------------------------------
 
 def _pipe_writer(pipe, q: queue.Queue):
-    """Drain the queue and write each item to the ffmpeg stdin pipe."""
     while True:
         item = q.get()
         if item is None:
@@ -128,13 +128,18 @@ def _pipe_writer(pipe, q: queue.Queue):
 # Main encode entry point
 # ---------------------------------------------------------------------------
 
-ENCODE_BATCH = 32   # frames generated + piped per iteration
+ENCODE_BATCH = 32
 
 
 def encode_files_to_video(file_paths: list, output_path: str, progress=None):
     def log(msg):
         if progress:
             progress(msg)
+
+    if NATIVE_AVAILABLE:
+        log('Pixel engine: C native library (maximum speed)')
+    else:
+        log('Pixel engine: NumPy fallback  —  run  python native/build.py  for faster encoding')
 
     log('Creating archive...')
     archive      = create_archive(file_paths)
@@ -144,49 +149,53 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
 
     encoded      = rs_encode(archive)
     encoded_size = len(encoded)
-    log(f'ECC encoded: {encoded_size:,} bytes.')
+    log(f'ECC encoded: {encoded_size:,} bytes  ({BYTES_PER_FRAME:,} bytes/frame).')
 
-    data_bits      = bytes_to_bits(encoded)
+    data_bits       = bytes_to_bits(encoded)
     num_data_frames = math.ceil(len(data_bits) / BITS_PER_FRAME)
-    pad = num_data_frames * BITS_PER_FRAME - len(data_bits)
+    pad             = num_data_frames * BITS_PER_FRAME - len(data_bits)
     if pad:
         data_bits = np.concatenate([data_bits, np.zeros(pad, dtype=np.uint8)])
 
-    header_raw  = pack_header(archive_size, num_data_frames, encoded_size, archive_crc)
-    header_bits = bytes_to_bits(header_raw * HEADER_REPEAT)
-    hpad = BITS_PER_FRAME - (len(header_bits) % BITS_PER_FRAME)
-    if hpad != BITS_PER_FRAME:
-        header_bits = np.concatenate([header_bits, np.zeros(hpad, dtype=np.uint8)])
+    total_frames        = 1 + num_data_frames
+    total_audio_samples = int(total_frames / FPS * _ac.SAMPLE_RATE)
+    audio_capacity      = _ac.max_payload_bytes(total_audio_samples)
+    log(f'Audio channel capacity: {audio_capacity:,} bytes '
+        f'(header copy embedded for decode robustness)')
 
-    total_frames = 1 + num_data_frames
+    # Header frame
+    header_raw = pack_header(archive_size, num_data_frames, encoded_size, archive_crc)
+    header_yuv = header_to_yuv_frame(header_raw)   # (YUV_FRAME_BYTES,) uint8
+
     codec, hw_params = _get_encoder()
-    log(f'Generating {total_frames} frames using {codec}...')
+    log(f'Generating {total_frames} YUV frames using {codec}...')
 
     exe = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [
         exe,
-        '-f', 'rawvideo', '-pix_fmt', 'gray',
+        '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
         '-s', f'{FRAME_WIDTH}x{FRAME_HEIGHT}',
         '-r', str(FPS),
         '-i', 'pipe:0',
         '-c:v', codec, *hw_params,
         '-pix_fmt', 'yuv420p',
+        '-an',                  # audio added as separate input below if needed
         '-y', output_path,
     ]
+
     kw = dict(stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if sys.platform == 'win32':
         kw['creationflags'] = subprocess.CREATE_NO_WINDOW
 
     proc = subprocess.Popen(cmd, **kw)
 
-    # Background thread handles all pipe writes so numpy gen and I/O overlap
     write_q: queue.Queue = queue.Queue(maxsize=4)
     writer_t = threading.Thread(target=_pipe_writer, args=(proc.stdin, write_q), daemon=True)
     writer_t.start()
 
     try:
-        # Header frame (single)
-        write_q.put(bits_to_frame(header_bits[:BITS_PER_FRAME]).tobytes())
+        # Header frame
+        write_q.put(header_yuv.tobytes())
 
         # Data frames in batches
         for batch_start in range(0, num_data_frames, ENCODE_BATCH):
@@ -196,17 +205,64 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
             if len(seg) < n * BITS_PER_FRAME:
                 seg = np.concatenate([seg,
                       np.zeros(n * BITS_PER_FRAME - len(seg), dtype=np.uint8)])
-            frames = bits_to_frames_batch(seg)     # (n, H, W) uint8, vectorised
-            write_q.put(frames.tobytes())           # one big write per batch
+            yuv_batch = bits_to_yuv_frames(seg)    # (n, YUV_FRAME_BYTES) uint8
+            write_q.put(yuv_batch.tobytes())
 
             done = batch_start + n
             if done % (ENCODE_BATCH * 10) == 0:
                 log(f'  frame {done}/{num_data_frames}...')
 
     finally:
-        write_q.put(None)   # signal writer thread to close pipe
+        write_q.put(None)
         writer_t.join()
         proc.wait()
 
+    # ── Add audio channel (separate ffmpeg pass to mux audio into the mp4) ──
+    _mux_audio(exe, output_path, header_raw, total_frames, log)
+
     log('Video encoding complete!')
     return output_path
+
+
+def _mux_audio(exe: str, video_path: str, header_raw: bytes,
+               total_frames: int, log) -> None:
+    """
+    Generate an FSK audio signal carrying the header and mux it into the video.
+    Runs a second ffmpeg pass: [video_only.mp4 + pcm_audio] → final.mp4
+    Silently skipped if the video is too short to carry even the preamble.
+    """
+    import tempfile
+    sr = _ac.SAMPLE_RATE
+    total_samples = int(total_frames / FPS * sr)
+    if _ac.max_payload_bytes(total_samples) < len(header_raw):
+        return   # video too short for audio preamble
+
+    log('Adding audio channel (FSK header copy)...')
+    sig   = _ac.encode_audio(header_raw, total_samples)
+    pcm   = _ac.float32_to_s16(sig)
+
+    tmp_vid = tempfile.mktemp(suffix='.mp4')
+    import shutil
+    shutil.move(video_path, tmp_vid)
+
+    kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if sys.platform == 'win32':
+        kw['creationflags'] = subprocess.CREATE_NO_WINDOW
+
+    # Pipe PCM into ffmpeg alongside the silent video
+    cmd = [
+        exe,
+        '-i', tmp_vid,
+        '-f', 's16le', '-ar', str(sr), '-ac', '1', '-i', 'pipe:0',
+        '-c:v', 'copy',
+        '-c:a', 'aac', '-b:a', '128k',
+        '-y', video_path,
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, **kw)
+    proc.stdin.write(pcm)
+    proc.stdin.close()
+    proc.wait()
+
+    import os
+    if os.path.exists(tmp_vid):
+        os.unlink(tmp_vid)
