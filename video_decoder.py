@@ -272,7 +272,9 @@ def _detect_version(video_path: str, log):
             if v_candidate == 3:
                 header, bs = _try_find_header_v3(batch)
             else:
-                header, bs = _try_find_header_v2(batch)
+                # Gray frames are (N, W*H) — reshape to (N, H, W) for v2 API
+                batch_3d = batch.reshape(-1, FRAME_HEIGHT, FRAME_WIDTH)
+                header, bs = _try_find_header_v2(batch_3d)
 
             if header is not None:
                 return v_candidate, header, bs

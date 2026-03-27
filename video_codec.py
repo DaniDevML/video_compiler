@@ -67,7 +67,7 @@ HEADER_FORMAT = '<8sIIIIBBBBBIxxx'
 # nroots(1) block_size(1) fps(1) bpp_y(1) planes(1) audio_bytes(4) pad(3)
 # = 36 bytes
 HEADER_SIZE   = struct.calcsize(HEADER_FORMAT)   # 36
-HEADER_REPEAT = 3
+HEADER_REPEAT = 5     # 5 copies × majority vote — tolerates 2 fully-corrupted copies
 
 # v2 legacy magic (for backward-compatible decode)
 MAGIC_V2      = b'VIDCMPR2'
@@ -384,18 +384,25 @@ def header_to_yuv_frame(header_raw: bytes,
 
 def yuv_frame_to_header(yuv_frame: np.ndarray,
                         block_size: int = BLOCK_SIZE) -> dict:
-    """Decode header from a single YUV frame, majority-voting across 3 copies."""
+    """Decode header from a single YUV frame, majority-voting across copies.
+
+    Tries both v3 and v2 header sizes since individual copies may have byte
+    errors that corrupt the magic before we majority-vote.
+    """
     row   = yuv_frame[np.newaxis]           # (1, YUV_FRAME_BYTES)
     bits  = yuv_frames_to_bits(row, block_size=block_size)[0]
     raw   = bits_to_bytes(bits)
-    # Pick the right header size for majority voting
-    hs    = HEADER_SIZE if raw[:8] == MAGIC else HEADER_SIZE_V2
-    copies = [raw[k * hs:(k + 1) * hs] for k in range(HEADER_REPEAT)]
-    hb     = bytearray(hs)
-    for b in range(hs):
-        votes = [c[b] if b < len(c) else 0 for c in copies]
-        hb[b] = Counter(votes).most_common(1)[0][0]
-    return unpack_header(bytes(hb))
+
+    for hs, expected_magic in [(HEADER_SIZE, MAGIC), (HEADER_SIZE_V2, MAGIC_V2)]:
+        copies = [raw[k * hs:(k + 1) * hs] for k in range(HEADER_REPEAT)]
+        hb = bytearray(hs)
+        for b in range(hs):
+            votes = [c[b] if b < len(c) else 0 for c in copies]
+            hb[b] = Counter(votes).most_common(1)[0][0]
+        if bytes(hb[:len(expected_magic)]) == expected_magic:
+            return unpack_header(bytes(hb))
+
+    raise ValueError('Header magic not recognised after majority vote')
 
 
 # ---------------------------------------------------------------------------

@@ -36,5 +36,13 @@ dist/
 build/
 *.egg-info/
 
+# ── Native C build artefacts ──────────────────────────────────────
+*.obj
+*.dll
+*.so
+*.exp
+*.lib
+*.bat
+
 # ── Claude Code internal ─────────────────────────────────────────
 .claude/
