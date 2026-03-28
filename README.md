@@ -90,6 +90,15 @@ Then open [http://localhost:5000](http://localhost:5000) in your browser.
 | Audio channel | Not used | FSK header backup |
 | Header copies | 3 | 5 |
 
+### Benchmarked throughput (pixel encode/decode only)
+
+| Engine | Encode | Decode |
+|---|---|---|
+| C native (MSVC/GCC/Clang) | **~9.6 MB/s** | **~7.2 MB/s** |
+| NumPy fallback | ~1.4 MB/s | ~1.1 MB/s |
+
+> Measured on a 2 MB payload. End-to-end speed (including ffmpeg, RS coding, and YouTube upload/download) is limited by the video pipeline and network, not the pixel engine.
+
 ## License
 
 For research and personal use.

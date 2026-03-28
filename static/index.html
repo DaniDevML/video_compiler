@@ -356,7 +356,7 @@
   <div class="result-box" id="enc-result">
     <div class="url-display">
       <a id="enc-url-link" href="#" target="_blank"></a>
-      <button class="copy-btn" onclick="copyUrl('enc-url-link')">Copy</button>
+      <button class="copy-btn" onclick="copyUrl('enc-url-link', this)">Copy</button>
     </div>
     <div class="info-pill">
       Video is unlisted — share the URL to allow decoding later.
@@ -391,8 +391,8 @@
 </div>
 
 <footer>
-  Encoding: 1920×1080 · 16×16 px blocks · 24 fps · Reed-Solomon ECC · H.264 CRF 18<br>
-  Effective throughput ≈ 20 KB/s · For research use only
+  1920×1080 YUV 4:2:0 · 4×4 px blocks · 30 fps · Reed-Solomon ECC · H.264<br>
+  Pixel engine ≈ 9.6 MB/s encode · 7.2 MB/s decode (C native) · For research use only
 </footer>
 
 <script>
@@ -685,13 +685,33 @@ function makeLogger(boxId) {
   };
 }
 
-function copyUrl(linkId) {
-  const url = document.getElementById(linkId).href;
-  navigator.clipboard.writeText(url).then(() => {
-    const btn = document.querySelector('.copy-btn');
+function copyUrl(linkId, btn) {
+  const el = document.getElementById(linkId);
+  const url = el.href || el.textContent;
+  if (!url || url === '#') return;
+
+  const flash = () => {
     btn.textContent = 'Copied!';
     setTimeout(() => btn.textContent = 'Copy', 1500);
-  });
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(flash).catch(() => fallbackCopy(url, flash));
+  } else {
+    fallbackCopy(url, flash);
+  }
+}
+
+function fallbackCopy(text, onSuccess) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); onSuccess(); }
+  catch(e) { /* ignore */ }
+  document.body.removeChild(ta);
 }
 
 function fmtBytes(n) {
