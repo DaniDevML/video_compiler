@@ -198,7 +198,7 @@ EXPORT void decode_plane(
 }
 
 
-/* ─── check_sync ──────────────────────────────────────────────────────────────
+/* ─── check_sync (single frame) ───────────────────────────────────────────────
  *
  * Score how well the sync rows of one frame match the expected checkerboard.
  * Returns 0–100 (integer percentage of correctly-decoded sync blocks).
@@ -234,4 +234,31 @@ EXPORT int check_sync(
         }
     }
     return total ? correct * 100 / total : 0;
+}
+
+
+/* ─── check_sync_batch ────────────────────────────────────────────────────────
+ *
+ * Score multiple frames at once, writing results to an int array.
+ * Avoids N separate Python→C round-trips.
+ */
+EXPORT void check_sync_batch(
+    const uint8_t *frames,
+    int           *scores_out,
+    int n_frames,
+    int plane_h,
+    int plane_w,
+    int block_size,
+    int blocks_x,
+    int sync_rows,
+    int margin
+) {
+    int frame_pixels = plane_h * plane_w;
+    for (int f = 0; f < n_frames; f++) {
+        scores_out[f] = check_sync(
+            frames + (size_t)f * frame_pixels,
+            plane_h, plane_w,
+            block_size, blocks_x, sync_rows, margin
+        );
+    }
 }

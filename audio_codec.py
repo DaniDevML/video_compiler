@@ -62,26 +62,26 @@ SILENCE_BITS   = int(SILENCE_SECS   * BITS_PER_SEC)
 SYNC_WORD = b'\xAA\x55\xAA\x55\xDE\xAD\xBE\xEF'
 
 
-# ─── RS helpers (lazy import so galois JIT is not triggered until needed) ─────
-
-_rs_enc = None
-_rs_dec = None
-
+# ─── RS helpers — reuse the already-warmed galois objects from video_codec ────
 
 def _get_rs():
-    global _rs_enc, _rs_dec
-    if _rs_enc is None:
-        import galois as _g
-        _GF  = _g.GF(2 ** 8)
-        _RS  = _g.ReedSolomon(255, AUDIO_CHUNK_IN)
-        _rs_enc = (_GF, _RS)
-        _rs_dec = (_GF, _RS)
-    return _rs_enc
+    """Import the pre-warmed RS objects from video_encoder/decoder (same params)."""
+    import galois as _g
+    _GF = _g.GF(2 ** 8)
+    # Reuse the module-level RS instance if available (already JIT-compiled)
+    try:
+        from video_codec import CHUNK_IN as _VCI
+        if _VCI == AUDIO_CHUNK_IN:
+            # Same RS params — import the pre-warmed encoder/decoder
+            import video_encoder as _ve
+            return _ve._GF, _ve._RS
+    except ImportError:
+        pass
+    return _GF, _g.ReedSolomon(255, AUDIO_CHUNK_IN)
 
 
 def _rs_encode_audio(data: bytes) -> bytes:
     GF, RS = _get_rs()
-    import numpy as np
     pad    = (-len(data)) % AUDIO_CHUNK_IN
     padded = data + b'\x00' * pad
     chunks = np.frombuffer(padded, dtype=np.uint8).reshape(-1, AUDIO_CHUNK_IN).astype(int)
@@ -91,7 +91,6 @@ def _rs_encode_audio(data: bytes) -> bytes:
 
 def _rs_decode_audio(data: bytes) -> bytes:
     GF, RS = _get_rs()
-    import numpy as np
     chunk_size = 255
     n = len(data) // chunk_size
     if n == 0:
@@ -104,13 +103,30 @@ def _rs_decode_audio(data: bytes) -> bytes:
 # ─── Phase-continuous FSK signal generation ──────────────────────────────────
 
 def _bits_to_signal(bits: np.ndarray) -> np.ndarray:
-    """Convert 0/1 bit array to a phase-continuous FSK float32 signal."""
-    freqs = np.where(bits == 1, float(FREQ_1), float(FREQ_0))
-    # Repeat each frequency for SAMPLES_PER_BIT samples
-    freq_samples = np.repeat(freqs, SAMPLES_PER_BIT)
-    # Accumulate phase for phase-continuity (no clicks between symbols)
-    phase = np.cumsum(2.0 * math.pi * freq_samples / SAMPLE_RATE)
-    return (np.sin(phase) * AMPLITUDE).astype(np.float32)
+    """Convert 0/1 bit array to a phase-continuous FSK float32 signal.
+
+    Generates per-symbol sine chunks and concatenates them, keeping phase
+    continuity between symbols by tracking the accumulated phase offset.
+    """
+    spb   = SAMPLES_PER_BIT
+    t     = np.arange(spb, dtype=np.float64) / SAMPLE_RATE
+    w0    = 2.0 * math.pi * FREQ_0
+    w1    = 2.0 * math.pi * FREQ_1
+
+    # Pre-compute one full cycle of each tone (per-symbol)
+    phase_inc_0 = w0 * spb / SAMPLE_RATE
+    phase_inc_1 = w1 * spb / SAMPLE_RATE
+
+    out   = np.empty(len(bits) * spb, dtype=np.float32)
+    phase = 0.0
+
+    for i, b in enumerate(bits):
+        w = w1 if b else w0
+        chunk = np.sin(phase + w * t) * AMPLITUDE
+        out[i * spb:(i + 1) * spb] = chunk.astype(np.float32)
+        phase += w * spb / SAMPLE_RATE
+
+    return out
 
 
 def _make_preamble_signal() -> np.ndarray:
@@ -240,58 +256,68 @@ def decode_audio(pcm_s16: bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
         return b''
 
 
+def _goertzel_batch(chunks: np.ndarray, freq: float, fs: float) -> np.ndarray:
+    """Vectorized Goertzel: compute energy at `freq` for all chunks at once.
+
+    Uses DFT bin computation via NumPy dot product — avoids the N-step
+    recurrence loop entirely.
+
+    chunks : (n_chunks, spb) float32/64
+    Returns: (n_chunks,) float64 energy values
+    """
+    N     = chunks.shape[1]
+    k     = freq * N / fs
+    n     = np.arange(N, dtype=np.float64)
+    # Complex DFT basis vector for the target frequency bin
+    basis = np.exp(-2j * math.pi * k * n / N)           # (N,)
+    # Dot product gives the DFT coefficient for each chunk
+    coeff = chunks.astype(np.float64) @ basis            # (n_chunks,)
+    return np.abs(coeff) ** 2                            # energy
+
+
 def _demod_bits(sig: np.ndarray, n_bits: int, spb: int) -> np.ndarray:
-    """Demodulate n_bits from the FSK signal using per-symbol energy comparison."""
-    bits = np.empty(n_bits, dtype=np.uint8)
-    for i in range(n_bits):
-        start = i * spb
-        end   = start + spb
-        if end > len(sig):
-            bits[i:] = 0
-            break
-        chunk = sig[start:end]
-        e0 = _goertzel_energy(chunk, FREQ_0, SAMPLE_RATE)
-        e1 = _goertzel_energy(chunk, FREQ_1, SAMPLE_RATE)
-        bits[i] = 1 if e1 > e0 else 0
+    """Demodulate n_bits from the FSK signal using batch Goertzel."""
+    available = len(sig) // spb
+    n = min(n_bits, available)
+    if n == 0:
+        return np.zeros(n_bits, dtype=np.uint8)
+
+    chunks = sig[:n * spb].reshape(n, spb)
+    e0 = _goertzel_batch(chunks, FREQ_0, SAMPLE_RATE)
+    e1 = _goertzel_batch(chunks, FREQ_1, SAMPLE_RATE)
+    bits = (e1 > e0).astype(np.uint8)
+
+    if n < n_bits:
+        bits = np.concatenate([bits, np.zeros(n_bits - n, dtype=np.uint8)])
     return bits
-
-
-def _goertzel_energy(x: np.ndarray, freq: float, fs: float) -> float:
-    """Goertzel algorithm: energy at a single frequency in array x."""
-    N   = len(x)
-    k   = freq * N / fs
-    w   = 2.0 * math.pi * k / N
-    cos_w = math.cos(w)
-    coeff = 2.0 * cos_w
-    s0 = s1 = s2 = 0.0
-    for sample in x:
-        s0 = float(sample) + coeff * s1 - s2
-        s2 = s1
-        s1 = s0
-    return s1 * s1 + s2 * s2 - coeff * s1 * s2
 
 
 def _find_preamble(sig: np.ndarray, spb: int) -> int:
     """
     Scan for a run of at least PREAMBLE_BITS consecutive FREQ_0 symbols.
     Returns the sample index of the first preamble symbol, or -1 if not found.
+    Vectorized: processes all symbols at once then scans the boolean array.
     """
-    required = PREAMBLE_BITS
-    run       = 0
+    required   = PREAMBLE_BITS
+    n_symbols  = len(sig) // spb
+    if n_symbols == 0:
+        return -1
+
+    chunks = sig[:n_symbols * spb].reshape(n_symbols, spb)
+    e0 = _goertzel_batch(chunks, FREQ_0, SAMPLE_RATE)
+    e1 = _goertzel_batch(chunks, FREQ_1, SAMPLE_RATE)
+    is_f0 = e0 > e1 * 1.5
+
+    # Find first run of `required` consecutive True values
+    run = 0
     run_start = 0
-    step      = spb
-    i         = 0
-    while i + spb <= len(sig):
-        chunk = sig[i:i + spb]
-        e0 = _goertzel_energy(chunk, FREQ_0, SAMPLE_RATE)
-        e1 = _goertzel_energy(chunk, FREQ_1, SAMPLE_RATE)
-        if e0 > e1 * 1.5:   # clearly FREQ_0
+    for i in range(n_symbols):
+        if is_f0[i]:
             if run == 0:
                 run_start = i
             run += 1
             if run >= required:
-                return run_start
+                return run_start * spb
         else:
             run = 0
-        i += step
     return -1

@@ -185,7 +185,7 @@ def _iter_batches_pipe(proc, frame_bytes: int, batch_size: int):
 def _read_all_frames_file(video_path: str, pix_fmt: str, frame_bytes: int):
     """
     Faster than piping for most videos: ffmpeg writes to a temp .raw file,
-    Python reads it in one numpy call.
+    Python memory-maps it to avoid loading everything into RAM at once.
     """
     import tempfile
     tmp = tempfile.mktemp(suffix='.raw')
@@ -195,14 +195,19 @@ def _read_all_frames_file(video_path: str, pix_fmt: str, frame_bytes: int):
     subprocess.run(_build_decode_cmd(video_path, pix_fmt, output=tmp), **kw)
 
     if not os.path.exists(tmp):
-        return None
+        return None, None
 
-    raw      = np.fromfile(tmp, dtype=np.uint8)
-    os.unlink(tmp)
-    n_frames = len(raw) // frame_bytes
+    file_size = os.path.getsize(tmp)
+    n_frames  = file_size // frame_bytes
     if n_frames == 0:
-        return None
-    return raw[:n_frames * frame_bytes].reshape(n_frames, frame_bytes)
+        os.unlink(tmp)
+        return None, None
+
+    usable = n_frames * frame_bytes
+    # Read into memory (memmap on Windows holds a file lock preventing deletion)
+    raw    = np.fromfile(tmp, dtype=np.uint8, count=usable)
+    os.unlink(tmp)
+    return raw.reshape(n_frames, frame_bytes), None
 
 # ---------------------------------------------------------------------------
 # Main decode entry point
@@ -253,9 +258,10 @@ def _detect_version(video_path: str, log):
         ('yuv420p', YUV_FRAME_BYTES, 3),
         ('gray',    FRAME_WIDTH * FRAME_HEIGHT, 2),
     ]:
+        tmp_path = None
         raw_size_est = os.path.getsize(video_path) * 20
         if raw_size_est < _FILE_IO_LIMIT_BYTES:
-            all_frames = _read_all_frames_file(video_path, pix_fmt, frame_bytes)
+            all_frames, tmp_path = _read_all_frames_file(video_path, pix_fmt, frame_bytes)
             if all_frames is None:
                 continue
             source = [(i, all_frames[i:i+DECODE_BATCH])
@@ -277,7 +283,18 @@ def _detect_version(video_path: str, log):
                 header, bs = _try_find_header_v2(batch_3d)
 
             if header is not None:
+                if tmp_path and os.path.exists(tmp_path):
+                    # Clean up the memmap temp file (detection only)
+                    del all_frames
+                    os.unlink(tmp_path)
                 return v_candidate, header, bs
+
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                del all_frames
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
     raise RuntimeError(
         "This doesn't appear to be a VidCompiler video — no data marker was found. "
@@ -326,9 +343,10 @@ def _decode_v3(video_path: str, header: dict, block_size: int,
     log(f'Header found. Archive: {header["archive_size"]:,} bytes, '
         f'{num_data_frames} data frames.')
 
+    tmp_path = None
     raw_size_est = os.path.getsize(video_path) * 20
     if raw_size_est < _FILE_IO_LIMIT_BYTES:
-        all_frames = _read_all_frames_file(video_path, 'yuv420p', frame_bytes)
+        all_frames, tmp_path = _read_all_frames_file(video_path, 'yuv420p', frame_bytes)
         if all_frames is None:
             raise RuntimeError('Failed to decode video frames.')
         source = [(i, all_frames[i:i+DECODE_BATCH])
@@ -371,6 +389,10 @@ def _decode_v3(video_path: str, header: dict, block_size: int,
                 proc.stdout.close()
             break
 
+    if tmp_path and os.path.exists(tmp_path):
+        del all_frames
+        os.unlink(tmp_path)
+
     return _finish_decode(header, bit_chunks, frames_read, BITS_PER_FRAME, output_dir, log)
 
 
@@ -388,9 +410,10 @@ def _decode_v2(video_path: str, header: dict, block_size: int,
     log(f'Header found (v2). Archive: {header["archive_size"]:,} bytes, '
         f'{num_data_frames} data frames.')
 
+    tmp_path = None
     raw_size_est = os.path.getsize(video_path) * 20
     if raw_size_est < _FILE_IO_LIMIT_BYTES:
-        all_frames = _read_all_frames_file(video_path, 'gray', frame_bytes)
+        all_frames, tmp_path = _read_all_frames_file(video_path, 'gray', frame_bytes)
         if all_frames is None:
             raise RuntimeError('Failed to decode video frames.')
         source = [(i, all_frames[i:i+DECODE_BATCH].reshape(-1, FRAME_HEIGHT, FRAME_WIDTH))
@@ -429,6 +452,10 @@ def _decode_v2(video_path: str, header: dict, block_size: int,
             if proc is not None:
                 proc.stdout.close()
             break
+
+    if tmp_path and os.path.exists(tmp_path):
+        del all_frames
+        os.unlink(tmp_path)
 
     return _finish_decode(header, bit_chunks, frames_read, bpf, output_dir, log)
 

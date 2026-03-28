@@ -170,18 +170,48 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
     codec, hw_params = _get_encoder()
     log(f'Generating {total_frames} YUV frames using {codec}...')
 
+    # ── Pre-generate audio PCM while building the ffmpeg command ──
+    sr = _ac.SAMPLE_RATE
+    total_samples = int(total_frames / FPS * sr)
+    has_audio = _ac.max_payload_bytes(total_samples) >= len(header_raw)
+
     exe = imageio_ffmpeg.get_ffmpeg_exe()
-    cmd = [
-        exe,
-        '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
-        '-s', f'{FRAME_WIDTH}x{FRAME_HEIGHT}',
-        '-r', str(FPS),
-        '-i', 'pipe:0',
-        '-c:v', codec, *hw_params,
-        '-pix_fmt', 'yuv420p',
-        '-an',                  # audio added as separate input below if needed
-        '-y', output_path,
-    ]
+
+    if has_audio:
+        log('Encoding video + audio in a single pass...')
+        audio_pcm = _ac.float32_to_s16(_ac.encode_audio(header_raw, total_samples))
+        # Write audio to a temp file (ffmpeg can't read two pipes simultaneously)
+        import tempfile
+        audio_tmp = tempfile.mktemp(suffix='.raw')
+        with open(audio_tmp, 'wb') as af:
+            af.write(audio_pcm)
+
+        cmd = [
+            exe,
+            '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
+            '-s', f'{FRAME_WIDTH}x{FRAME_HEIGHT}',
+            '-r', str(FPS),
+            '-i', 'pipe:0',
+            '-f', 's16le', '-ar', str(sr), '-ac', '1', '-i', audio_tmp,
+            '-c:v', codec, *hw_params,
+            '-c:a', 'aac', '-b:a', '128k',
+            '-pix_fmt', 'yuv420p',
+            '-shortest',
+            '-y', output_path,
+        ]
+    else:
+        audio_tmp = None
+        cmd = [
+            exe,
+            '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
+            '-s', f'{FRAME_WIDTH}x{FRAME_HEIGHT}',
+            '-r', str(FPS),
+            '-i', 'pipe:0',
+            '-c:v', codec, *hw_params,
+            '-pix_fmt', 'yuv420p',
+            '-an',
+            '-y', output_path,
+        ]
 
     kw = dict(stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if sys.platform == 'win32':
@@ -217,52 +247,10 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
         writer_t.join()
         proc.wait()
 
-    # ── Add audio channel (separate ffmpeg pass to mux audio into the mp4) ──
-    _mux_audio(exe, output_path, header_raw, total_frames, log)
+    if audio_tmp and os.path.exists(audio_tmp):
+        os.unlink(audio_tmp)
 
     log('Video encoding complete!')
     return output_path
 
 
-def _mux_audio(exe: str, video_path: str, header_raw: bytes,
-               total_frames: int, log) -> None:
-    """
-    Generate an FSK audio signal carrying the header and mux it into the video.
-    Runs a second ffmpeg pass: [video_only.mp4 + pcm_audio] → final.mp4
-    Silently skipped if the video is too short to carry even the preamble.
-    """
-    import tempfile
-    sr = _ac.SAMPLE_RATE
-    total_samples = int(total_frames / FPS * sr)
-    if _ac.max_payload_bytes(total_samples) < len(header_raw):
-        return   # video too short for audio preamble
-
-    log('Adding audio channel (FSK header copy)...')
-    sig   = _ac.encode_audio(header_raw, total_samples)
-    pcm   = _ac.float32_to_s16(sig)
-
-    tmp_vid = tempfile.mktemp(suffix='.mp4')
-    import shutil
-    shutil.move(video_path, tmp_vid)
-
-    kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if sys.platform == 'win32':
-        kw['creationflags'] = subprocess.CREATE_NO_WINDOW
-
-    # Pipe PCM into ffmpeg alongside the silent video
-    cmd = [
-        exe,
-        '-i', tmp_vid,
-        '-f', 's16le', '-ar', str(sr), '-ac', '1', '-i', 'pipe:0',
-        '-c:v', 'copy',
-        '-c:a', 'aac', '-b:a', '128k',
-        '-y', video_path,
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, **kw)
-    proc.stdin.write(pcm)
-    proc.stdin.close()
-    proc.wait()
-
-    import os
-    if os.path.exists(tmp_vid):
-        os.unlink(tmp_vid)

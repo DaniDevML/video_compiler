@@ -252,7 +252,8 @@ def _check_sync_np(frames: np.ndarray, p: dict,
 
 try:
     from native import (NATIVE_AVAILABLE,
-                        encode_plane_c, decode_plane_c, check_sync_c)
+                        encode_plane_c, decode_plane_c,
+                        check_sync_c, check_sync_batch_c)
 except ImportError:
     NATIVE_AVAILABLE = False
 
@@ -280,12 +281,10 @@ def _decode_plane(frames: np.ndarray, p: dict) -> np.ndarray:
 def _check_sync(frames: np.ndarray, p: dict,
                 min_accuracy: float = 0.75) -> np.ndarray:
     if NATIVE_AVAILABLE:
-        N = len(frames)
-        scores = np.array([
-            check_sync_c(frames[i], p['ph'], p['pw'],
-                         p['bs'], p['bx'], SYNC_ROWS, p['m'])
-            for i in range(N)
-        ])
+        scores = check_sync_batch_c(
+            frames.reshape(len(frames), -1),
+            p['ph'], p['pw'], p['bs'], p['bx'], SYNC_ROWS, p['m'],
+        )
         return scores >= int(min_accuracy * 100)
     return _check_sync_np(frames, p, min_accuracy)
 

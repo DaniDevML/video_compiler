@@ -66,6 +66,20 @@ def _load():
             ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ]
 
+        _c_int_p = ctypes.POINTER(ctypes.c_int)
+        lib.check_sync_batch.restype  = None
+        lib.check_sync_batch.argtypes = [
+            _c_uint8_p,     # frames
+            _c_int_p,       # scores_out
+            ctypes.c_int,   # n_frames
+            ctypes.c_int,   # plane_h
+            ctypes.c_int,   # plane_w
+            ctypes.c_int,   # block_size
+            ctypes.c_int,   # blocks_x
+            ctypes.c_int,   # sync_rows
+            ctypes.c_int,   # margin
+        ]
+
         _lib = lib
     except Exception as e:
         print(f'[native] Warning: could not load {_LIB_NAME}: {e}')
@@ -131,3 +145,20 @@ def check_sync_c(frame: np.ndarray,
         plane_h, plane_w,
         block_size, blocks_x, sync_rows, margin,
     )
+
+
+def check_sync_batch_c(frames: np.ndarray,
+                       plane_h: int, plane_w: int,
+                       block_size: int, blocks_x: int,
+                       sync_rows: int, margin: int) -> np.ndarray:
+    """Batch check_sync: returns (n_frames,) int32 scores (0-100)."""
+    n_frames = len(frames)
+    scores   = np.empty(n_frames, dtype=np.int32)
+    frames_c = np.ascontiguousarray(frames, dtype=np.uint8)
+    _lib.check_sync_batch(
+        _ptr(frames_c),
+        scores.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        n_frames, plane_h, plane_w,
+        block_size, blocks_x, sync_rows, margin,
+    )
+    return scores

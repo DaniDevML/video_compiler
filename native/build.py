@@ -4,7 +4,7 @@ native/build.py — Compile frame_ops.c into a shared library.
 Run once before starting the app for maximum performance:
     python native/build.py
 
-Tries compilers in order: MSVC cl.exe → GCC → Clang.
+Tries compilers in order: MSVC cl.exe -> GCC -> Clang.
 Falls back gracefully if no compiler is found (app uses NumPy path instead).
 """
 
@@ -60,16 +60,21 @@ def build():
         if cl_path and os.path.exists(cl_path):
             # Locate accompanying lib directory and Python headers
             import glob as _g
-            msvc_base = os.path.dirname(os.path.dirname(os.path.dirname(cl_path)))  # …/MSVC/<ver>
-            msvc_lib  = os.path.join(msvc_base, 'lib', 'x64')
+            # cl_path: …/MSVC/<ver>/bin/Hostx64/x64/cl.exe -> need …/MSVC/<ver>
+            msvc_ver  = cl_path
+            for _ in range(4):
+                msvc_ver = os.path.dirname(msvc_ver)
+            msvc_lib  = os.path.join(msvc_ver, 'lib', 'x64')
             py_inc    = _g.glob(
                 r'C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12*\include',
             )
             py_inc = py_inc[0] if py_inc else ''
-            vcvars = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(cl_path)))),
-                r'Auxiliary\Build\vcvars64.bat',
-            )
+            # cl_path: …/VC/Tools/MSVC/<ver>/bin/Hostx64/x64/cl.exe
+            # We need: …/VC/Auxiliary/Build/vcvars64.bat  (7 dirname levels up)
+            vc_root = cl_path
+            for _ in range(7):
+                vc_root = os.path.dirname(vc_root)
+            vcvars = os.path.join(vc_root, r'Auxiliary\Build\vcvars64.bat')
 
             obj    = os.path.join(_HERE, 'frame_ops.obj')
             lib1   = os.path.join(msvc_lib, 'msvcrt.lib')
@@ -94,7 +99,7 @@ def build():
                 if os.path.exists(junk):
                     os.unlink(junk)
             if ok and os.path.exists(_OUT):
-                print(f'[native] Built with MSVC → {_OUT}')
+                print(f'[native] Built with MSVC -> {_OUT}')
                 return True
             print(f'[native] MSVC failed: {err[:300]}')
 
@@ -104,7 +109,7 @@ def build():
             ok, err = _run([gcc, '-O3', '-march=native', '-shared',
                             '-o', _OUT, _SRC])
             if ok and os.path.exists(_OUT):
-                print(f'[native] Built with GCC → {_OUT}')
+                print(f'[native] Built with GCC -> {_OUT}')
                 return True
             print(f'[native] GCC failed: {err[:300]}')
 
@@ -118,7 +123,7 @@ def build():
                 continue
             ok, err = _run([exe, *extra, '-o', _OUT, _SRC])
             if ok and os.path.exists(_OUT):
-                print(f'[native] Built with {compiler} → {_OUT}')
+                print(f'[native] Built with {compiler} -> {_OUT}')
                 return True
             print(f'[native] {compiler} failed: {err[:300]}')
 
