@@ -37,7 +37,7 @@ Decoding reverses the pipeline: download → extract raw frames → decode pixel
 ## Features
 
 - **4x data density** over v2 — multi-level gray encoding on all three YUV planes
-- **C native pixel engine** (~8 MB/s encode, ~6 MB/s decode) with automatic NumPy fallback
+- **C native pixel engine** (~3x faster than NumPy) with automatic fallback
 - **Hardware encoder auto-detection** — Intel QSV, NVIDIA NVENC, AMD AMF, or software libx264
 - **FSK audio channel** — header backup survives even if video frames are partially corrupted
 - **Backward compatible** — decodes v4 (`VIDCMPR4`), v3 (`VIDCMPR3`), and legacy v2 (`VIDCMPR2`) videos
@@ -120,12 +120,14 @@ video_compiler/
 
 ### Performance
 
+Raw pixel engine throughput (5 trials x 4 sizes, trimmed mean):
+
 | Engine | Encode | Decode | vs NumPy |
 |---|---|---|---|
-| **C native** (MSVC/GCC/Clang) | **~8.1 MB/s** | **~5.9 MB/s** | **~3x faster** |
+| **C native** (MSVC/GCC/Clang) | **~8 MB/s** | **~6 MB/s** | **~3x faster** |
 | NumPy fallback | ~2.4 MB/s | ~2.3 MB/s | baseline |
 
-> Pixel engine throughput only. End-to-end speed is bounded by ffmpeg encoding and network I/O.
+> Pixel engine only. End-to-end speed is bounded by ffmpeg encoding and network I/O. v4's higher data density (64,200 vs 40,140 bytes/frame) means ~1.6x fewer frames per file, so wall-clock time improves despite similar per-byte throughput.
 
 ### End-to-End Throughput by File Type
 
