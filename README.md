@@ -37,7 +37,7 @@ Decoding reverses the pipeline: download → extract raw frames → decode pixel
 ## Features
 
 - **4x data density** over v2 — multi-level gray encoding on all three YUV planes
-- **C native pixel engine** (~9.6 MB/s encode, ~7.2 MB/s decode) with automatic NumPy fallback
+- **C native pixel engine** (~17.6 MB/s encode, ~15.7 MB/s decode) with automatic NumPy fallback
 - **Hardware encoder auto-detection** — Intel QSV, NVIDIA NVENC, AMD AMF, or software libx264
 - **FSK audio channel** — header backup survives even if video frames are partially corrupted
 - **Backward compatible** — decodes v4 (`VIDCMPR4`), v3 (`VIDCMPR3`), and legacy v2 (`VIDCMPR2`) videos
@@ -122,8 +122,8 @@ video_compiler/
 
 | Engine | Encode | Decode | vs NumPy |
 |---|---|---|---|
-| **C native** (MSVC/GCC/Clang) | **~9.6 MB/s** | **~7.2 MB/s** | **~7x faster** |
-| NumPy fallback | ~1.4 MB/s | ~1.1 MB/s | baseline |
+| **C native** (MSVC/GCC/Clang) | **~17.6 MB/s** | **~15.7 MB/s** | **~2.2x faster** |
+| NumPy fallback | ~8.0 MB/s | ~7.0 MB/s | baseline |
 
 > Pixel engine throughput only. End-to-end speed is bounded by ffmpeg encoding and network I/O.
 
