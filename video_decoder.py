@@ -1,17 +1,8 @@
 """
-Video decoder (v3): H.264/AAC video → original files
+Video decoder (v4): H.264/AAC video → original files
 
-Handles both v3 (YUV 4:2:0, 2-bpp Y + 1-bpp Cb/Cr) and v2 (grayscale 1-bpp)
-by auto-detecting the magic bytes in the header frame.
-
-v3 decode path:
-  1. ffmpeg outputs raw yuv420p frames (3 planes per frame)
-  2. Y plane decoded with 2-bpp quantisation (4 gray levels)
-  3. Cb/Cr planes decoded with 1-bpp quantisation
-  4. Bits concatenated → RS decode → un-tar → output files
-
-v2 decode path (backward compat):
-  Exactly as before — grayscale frames, 1-bpp, VIDCMPR2 magic.
+Handles v4 (3-bpp Y + 2-bpp Cb/Cr), v3 (2-bpp Y + 1-bpp Cb/Cr), and
+v2 (grayscale 1-bpp) by auto-detecting the magic bytes in the header frame.
 """
 
 import io
@@ -30,7 +21,7 @@ from video_codec import (
     YUV_FRAME_BYTES, Y_PLANE_BYTES, CB_PLANE_BYTES,
     NROOTS, CHUNK_IN, FPS,
     HEADER_SIZE, HEADER_REPEAT,
-    MAGIC, MAGIC_V2,
+    MAGIC, MAGIC_V3, MAGIC_V2,
     unpack_header, bits_to_bytes,
     yuv_frames_to_bits, check_sync_yuv, yuv_frame_to_header,
     # v2 compat
@@ -235,8 +226,9 @@ def decode_video_to_files(video_path: str, output_dir: str, progress=None) -> li
     # ── Probe: detect v2 (gray) vs v3 (yuv420p) by scanning the first few frames ──
     log('Detecting video format...')
     version, header, block_size = _detect_version(video_path, log)
-    log(f'Format: {"v3 YUV 2-bpp" if version == 3 else "v2 grayscale 1-bpp"}  '
-        f'(block_size={block_size})')
+    fmt_label = {3: f'v{header["magic"][-1:].decode()} YUV {header["bpp_y"]}-bpp Y + {header["bpp_c"]}-bpp C',
+                 2: 'v2 grayscale 1-bpp'}
+    log(f'Format: {fmt_label[version]}  (block_size={block_size})')
 
     if version == 3:
         return _decode_v3(video_path, header, block_size, output_dir, log)
@@ -304,14 +296,14 @@ def _detect_version(video_path: str, log):
 
 
 def _try_find_header_v3(batch: np.ndarray):
-    """Try to find and decode a v3 header in a batch of YUV frames."""
+    """Try to find and decode a v4/v3 header in a batch of YUV frames."""
     for bs in _CANDIDATE_BLOCK_SIZES:
         sync_mask = check_sync_yuv(batch, block_size=bs)
         for i in np.where(sync_mask)[0]:
             try:
                 frame_row = batch[i:i+1]   # (1, YUV_FRAME_BYTES)
                 h = yuv_frame_to_header(frame_row[0], block_size=bs)
-                if h['magic'] == MAGIC:
+                if h['magic'] in (MAGIC, MAGIC_V3):
                     return h, bs
             except Exception:
                 continue
@@ -367,7 +359,7 @@ def _decode_v3(video_path: str, header: dict, block_size: int,
             for i in np.where(sync_mask)[0]:
                 try:
                     h = yuv_frame_to_header(batch[i], block_size=block_size)
-                    if h['magic'] == MAGIC:
+                    if h['magic'] in (MAGIC, MAGIC_V3):
                         found_header = True
                         tail = batch[i + 1:]
                         if len(tail):

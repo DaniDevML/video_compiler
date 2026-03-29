@@ -1,12 +1,8 @@
 """
-Video encoder (v3): files → H.264/AAC video
+Video encoder (v4): files → H.264/AAC video
 
-v3 improvements over v2:
-  • 2-bpp Y plane + 1-bpp Cb/Cr planes → 2.5× more data per frame (40 140 bytes vs 16 080)
-  • YUV 4:2:0 piped directly to ffmpeg — all three planes carry data
-  • Audio channel (FSK steganography) embeds header for extra decode robustness
-  • C native fast path for pixel ops (run 'python native/build.py' to enable)
-  • Hardware encoder: QSV → NVENC → AMF → libx264 (unchanged)
+v4: 3-bpp Y plane (8 gray levels) + 2-bpp Cb/Cr planes (4 gray levels)
+    → 64,200 bytes/frame (1.6× over v3's 40,140)
 """
 
 import io

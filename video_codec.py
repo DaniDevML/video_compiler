@@ -1,12 +1,10 @@
 # video_codec.py — Shared codec constants and batch-vectorised encode/decode primitives.
 #
-# v3 format improvements over v2:
-#   • 2 bits per pixel on the Y (luma) plane  → 4 gray levels (0/85/170/255)
-#   • 1 bit per pixel on Cb/Cr (chroma) planes → 2× more data for "free"
-#   • YUV 4:2:0 frame layout used in full: Y + Cb + Cr
-#   • Optional audio channel (FSK steganography via audio_codec.py)
-#   • C native fast path via native/ (ctypes shared library)
-#   • Backward-compatible: decoder still handles VIDCMPR2 grayscale videos
+# v4 format improvements over v3:
+#   • 3 bits per pixel on the Y (luma) plane  → 8 gray levels (gap ≈ 36, above ±15 noise)
+#   • 2 bits per pixel on Cb/Cr (chroma) planes → 4 levels (gap = 85)
+#   • 1.6× more data per frame (64,080 bytes vs 40,140)
+#   • Backward-compatible: decoder handles VIDCMPR4, VIDCMPR3, and VIDCMPR2
 
 import struct
 from collections import Counter
@@ -29,8 +27,8 @@ BLOCKS_Y      = FRAME_HEIGHT // BLOCK_SIZE   # 270
 SYNC_ROWS     = 2
 DATA_ROWS     = BLOCKS_Y - SYNC_ROWS         # 268
 
-BPP_Y         = 2          # bits per block on Y plane (4 gray levels)
-BPP_C         = 1          # bits per block on Cb/Cr planes
+BPP_Y         = 3          # bits per block on Y plane (8 gray levels)
+BPP_C         = 2          # bits per block on Cb/Cr planes (4 gray levels)
 
 # ── Cb/Cr (chroma) planes — each is half the Y size due to 4:2:0 ────────────
 CHROMA_W      = FRAME_WIDTH  // 2            # 960
@@ -40,11 +38,11 @@ BLOCKS_Y_C    = CHROMA_H // BLOCK_SIZE       # 135
 DATA_ROWS_C   = BLOCKS_Y_C - SYNC_ROWS       # 133
 
 # ── Data capacity per frame ─────────────────────────────────────────────────
-BITS_PER_FRAME_Y  = BLOCKS_X   * DATA_ROWS   * BPP_Y   # 257 280
-BITS_PER_FRAME_C  = BLOCKS_X_C * DATA_ROWS_C * BPP_C   # 31 920  (per chroma plane)
-BITS_PER_FRAME    = BITS_PER_FRAME_Y + 2 * BITS_PER_FRAME_C  # 321 120
-BYTES_PER_FRAME   = BITS_PER_FRAME // 8                 # 40 140
-# vs v2: 16 080 bytes/frame  →  2.5× improvement
+BITS_PER_FRAME_Y  = BLOCKS_X   * DATA_ROWS   * BPP_Y   # 385,920
+BITS_PER_FRAME_C  = BLOCKS_X_C * DATA_ROWS_C * BPP_C   # 63,840  (per chroma plane)
+BITS_PER_FRAME    = BITS_PER_FRAME_Y + 2 * BITS_PER_FRAME_C  # 513,600
+BYTES_PER_FRAME   = BITS_PER_FRAME // 8                 # 64,200
+# vs v3: 40,140 bytes/frame  →  1.6× improvement
 
 # ── Frame byte sizes (raw pixel counts) ─────────────────────────────────────
 Y_PLANE_BYTES  = FRAME_WIDTH * FRAME_HEIGHT      # 2 073 600
@@ -52,22 +50,28 @@ CB_PLANE_BYTES = CHROMA_W * CHROMA_H             #   518 400
 CR_PLANE_BYTES = CHROMA_W * CHROMA_H             #   518 400
 YUV_FRAME_BYTES = Y_PLANE_BYTES + CB_PLANE_BYTES + CR_PLANE_BYTES  # 3 110 400
 
-# ── Gray levels for 2-bpp encoding ──────────────────────────────────────────
-# Gap between adjacent levels = 85 units > ±15 typical YouTube H.264 noise.
-LEVELS_2BPP = np.array([0, 85, 170, 255], dtype=np.uint8)
+# ── Gray levels ────────────────────────────────────────────────────────────
+# Gap between adjacent levels must exceed ±15 typical YouTube H.264 noise.
+LEVELS_2BPP = np.array([0, 85, 170, 255], dtype=np.uint8)            # gap=85
+LEVELS_3BPP = np.array([0, 36, 73, 109, 146, 182, 219, 255], dtype=np.uint8)  # gap≈36
 
 # ── RS / header ─────────────────────────────────────────────────────────────
 NROOTS        = 40
 CHUNK_IN      = 255 - NROOTS               # 215
 
-# v3 format
-MAGIC         = b'VIDCMPR3'
-HEADER_FORMAT = '<8sIIIIBBBBBIxxx'
+# v4 format
+MAGIC         = b'VIDCMPR4'
+HEADER_FORMAT = '<8sIIIIBBBBBBIxx'
 # magic(8) archive_size(4) num_data_frames(4) encoded_size(4) crc32(4)
-# nroots(1) block_size(1) fps(1) bpp_y(1) planes(1) audio_bytes(4) pad(3)
+# nroots(1) block_size(1) fps(1) bpp_y(1) bpp_c(1) planes(1) audio_bytes(4) pad(2)
 # = 36 bytes
 HEADER_SIZE   = struct.calcsize(HEADER_FORMAT)   # 36
 HEADER_REPEAT = 5     # 5 copies × majority vote — tolerates 2 fully-corrupted copies
+
+# v3 legacy magic
+MAGIC_V3      = b'VIDCMPR3'
+HEADER_FORMAT_V3 = '<8sIIIIBBBBBIxxx'
+HEADER_SIZE_V3   = struct.calcsize(HEADER_FORMAT_V3)
 
 # v2 legacy magic (for backward-compatible decode)
 MAGIC_V2      = b'VIDCMPR2'
@@ -127,28 +131,35 @@ def pack_header(archive_size, num_data_frames, encoded_size, crc32,
     raw = struct.pack(HEADER_FORMAT,
                       MAGIC, archive_size, num_data_frames, encoded_size, crc32,
                       NROOTS, BLOCK_SIZE, FPS,
-                      BPP_Y, 3,           # bpp_y, planes (3 = YUV)
+                      BPP_Y, BPP_C, 3,   # bpp_y, bpp_c, planes (3 = YUV)
                       audio_bytes)
     assert len(raw) == HEADER_SIZE
     return raw
 
 
 def unpack_header(raw: bytes) -> dict:
-    """Parse a v2 or v3 header. Always returns a unified dict."""
+    """Parse a v2, v3, or v4 header. Always returns a unified dict."""
     magic = raw[:8]
     if magic == MAGIC_V2:
         sz = HEADER_SIZE_V2
         magic, arch, ndf, enc, crc, nr, bs, fps = struct.unpack(HEADER_FORMAT_V2, raw[:sz])
         return dict(magic=magic, archive_size=arch, num_data_frames=ndf,
                     encoded_size=enc, crc32=crc, nroots=nr, block_size=bs,
-                    fps=fps, bpp_y=1, planes=1, audio_bytes=0)
+                    fps=fps, bpp_y=1, bpp_c=0, planes=1, audio_bytes=0)
+    if magic == MAGIC_V3:
+        sz = HEADER_SIZE_V3
+        magic, arch, ndf, enc, crc, nr, bs, fps, bpy, planes, abytes = \
+            struct.unpack(HEADER_FORMAT_V3, raw[:sz])
+        return dict(magic=magic, archive_size=arch, num_data_frames=ndf,
+                    encoded_size=enc, crc32=crc, nroots=nr, block_size=bs,
+                    fps=fps, bpp_y=bpy, bpp_c=1, planes=planes, audio_bytes=abytes)
     if magic == MAGIC:
         sz = HEADER_SIZE
-        magic, arch, ndf, enc, crc, nr, bs, fps, bpy, planes, abytes = \
+        magic, arch, ndf, enc, crc, nr, bs, fps, bpy, bpc, planes, abytes = \
             struct.unpack(HEADER_FORMAT, raw[:sz])
         return dict(magic=magic, archive_size=arch, num_data_frames=ndf,
                     encoded_size=enc, crc32=crc, nroots=nr, block_size=bs,
-                    fps=fps, bpp_y=bpy, planes=planes, audio_bytes=abytes)
+                    fps=fps, bpp_y=bpy, bpp_c=bpc, planes=planes, audio_bytes=abytes)
     raise ValueError(f'Unknown header magic: {magic!r}')
 
 # ---------------------------------------------------------------------------
@@ -185,9 +196,14 @@ def _encode_plane_np(bits_flat: np.ndarray, p: dict) -> np.ndarray:
 
     if bpp == 1:
         pixels = data[:, :, :, 0].astype(np.uint8) * np.uint8(255)   # (N, dr, bx)
-    else:  # bpp == 2 : MSB-first → symbol 0-3
+    elif bpp == 2:  # MSB-first → symbol 0-3
         sym    = data[:, :, :, 0].astype(np.uint16) * 2 + data[:, :, :, 1]
         pixels = LEVELS_2BPP[sym.astype(np.uint8)]                    # (N, dr, bx)
+    else:  # bpp == 3 : MSB-first → symbol 0-7
+        sym = (data[:, :, :, 0].astype(np.uint16) * 4
+             + data[:, :, :, 1].astype(np.uint16) * 2
+             + data[:, :, :, 2])
+        pixels = LEVELS_3BPP[sym.astype(np.uint8)]                    # (N, dr, bx)
 
     expanded = np.repeat(np.repeat(pixels, bs, axis=1), bs, axis=2)   # (N, dr*bs, bx*bs)
 
@@ -220,15 +236,27 @@ def _decode_plane_np(frames: np.ndarray, p: dict) -> np.ndarray:
     if bpp == 1:
         bits = (mean >= 128).astype(np.uint8)                # (N, dr, bx)
         return bits.reshape(N, bpf)
-    else:  # bpp == 2
+    elif bpp == 2:
         sym = np.zeros_like(mean, dtype=np.uint8)
         sym[mean >= 43]  = 1
         sym[mean >= 128] = 2
         sym[mean >= 213] = 3
-        # Unpack to 2 bits each (MSB first): (N, dr, bx, 2)
         bit0 = (sym >> 1) & 1
         bit1 =  sym       & 1
         return np.stack([bit0, bit1], axis=-1).reshape(N, bpf)
+    else:  # bpp == 3
+        sym = np.zeros_like(mean, dtype=np.uint8)
+        sym[mean >= 18]  = 1
+        sym[mean >= 55]  = 2
+        sym[mean >= 91]  = 3
+        sym[mean >= 128] = 4
+        sym[mean >= 164] = 5
+        sym[mean >= 200] = 6
+        sym[mean >= 237] = 7
+        bit0 = (sym >> 2) & 1
+        bit1 = (sym >> 1) & 1
+        bit2 =  sym       & 1
+        return np.stack([bit0, bit1, bit2], axis=-1).reshape(N, bpf)
 
 
 def _check_sync_np(frames: np.ndarray, p: dict,
@@ -392,7 +420,8 @@ def yuv_frame_to_header(yuv_frame: np.ndarray,
     bits  = yuv_frames_to_bits(row, block_size=block_size)[0]
     raw   = bits_to_bytes(bits)
 
-    for hs, expected_magic in [(HEADER_SIZE, MAGIC), (HEADER_SIZE_V2, MAGIC_V2)]:
+    for hs, expected_magic in [(HEADER_SIZE, MAGIC), (HEADER_SIZE_V3, MAGIC_V3),
+                               (HEADER_SIZE_V2, MAGIC_V2)]:
         copies = [raw[k * hs:(k + 1) * hs] for k in range(HEADER_REPEAT)]
         hb = bytearray(hs)
         for b in range(hs):

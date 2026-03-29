@@ -45,23 +45,35 @@ static void fill_bytes(uint8_t *dst, uint8_t val, size_t n) {
 
 /* Gray levels for each bpp mode.
  *
- *  bpp=1: 2 levels  {  0, 255 }  — current 1-bit-per-block mode
- *  bpp=2: 4 levels  {  0,  85, 170, 255 }  — new 2-bits-per-block mode
+ *  bpp=1: 2 levels  {  0, 255 }                                — 1 bit/block
+ *  bpp=2: 4 levels  {  0,  85, 170, 255 }                      — 2 bits/block
+ *  bpp=3: 8 levels  {  0,  36,  73, 109, 146, 182, 219, 255 }  — 3 bits/block
  *
- * Gap between adjacent levels is 85 units, well above the ±15 unit
- * quantisation noise YouTube's H.264 re-encode introduces at ≥ 4-pixel blocks.
+ * bpp=2 gap = 85, bpp=3 gap ≈ 36 — both above ±15 YouTube H.264 noise at 4×4 blocks.
  */
 static const uint8_t kLevels1[2] = {0, 255};
 static const uint8_t kLevels2[4] = {0, 85, 170, 255};
+static const uint8_t kLevels3[8] = {0, 36, 73, 109, 146, 182, 219, 255};
 
 /* Quantise a mean pixel value to a symbol index for a given bpp. */
 static inline int quantize(int mean, int bpp) {
     if (bpp == 1) return mean >= 128 ? 1 : 0;
-    /* bpp == 2: thresholds at 43, 128, 213 (midpoints between levels) */
-    if (mean < 43)  return 0;
-    if (mean < 128) return 1;
-    if (mean < 213) return 2;
-    return 3;
+    if (bpp == 2) {
+        /* thresholds at midpoints: 43, 128, 213 */
+        if (mean < 43)  return 0;
+        if (mean < 128) return 1;
+        if (mean < 213) return 2;
+        return 3;
+    }
+    /* bpp == 3: 8 levels, thresholds at midpoints between kLevels3 */
+    if (mean <  18) return 0;
+    if (mean <  55) return 1;
+    if (mean <  91) return 2;
+    if (mean < 128) return 3;
+    if (mean < 164) return 4;
+    if (mean < 200) return 5;
+    if (mean < 237) return 6;
+    return 7;
 }
 
 /* ─── encode_plane ────────────────────────────────────────────────────────────
@@ -94,7 +106,7 @@ EXPORT void encode_plane(
     int sync_rows,
     int bpp
 ) {
-    const uint8_t *lvls      = (bpp == 1) ? kLevels1 : kLevels2;
+    const uint8_t *lvls      = (bpp == 1) ? kLevels1 : (bpp == 2) ? kLevels2 : kLevels3;
     int bits_per_block        = bpp;
     int bits_per_frame        = blocks_y_data * blocks_x * bits_per_block;
     int frame_pixels          = plane_h * plane_w;
