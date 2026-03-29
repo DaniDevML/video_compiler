@@ -120,14 +120,14 @@ video_compiler/
 
 ### Performance
 
-Raw pixel engine throughput (5 trials x 4 sizes, trimmed mean):
+Pixel engine throughput (median of 3 trials, 1--50 MB files):
 
 | Engine | Encode | Decode | vs NumPy |
 |---|---|---|---|
-| **C native** (MSVC/GCC/Clang) | **~8 MB/s** | **~6 MB/s** | **~3x faster** |
-| NumPy fallback | ~2.4 MB/s | ~2.3 MB/s | baseline |
+| **C native** (MSVC/GCC/Clang) | **4--7 MB/s** | **5--7 MB/s** | **~4x faster** |
+| NumPy fallback | 0.8--1.5 MB/s | 1.4--2.3 MB/s | baseline |
 
-> Pixel engine only. End-to-end speed is bounded by ffmpeg encoding and network I/O. v4's higher data density (64,200 vs 40,140 bytes/frame) means ~1.6x fewer frames per file, so wall-clock time improves despite similar per-byte throughput.
+> Pixel engine only. v4 encodes 1.6x fewer frames than v3 for the same file, so the main speed gain comes from less ffmpeg encoding and smaller uploads/downloads.
 
 ### End-to-End Throughput by File Type
 
