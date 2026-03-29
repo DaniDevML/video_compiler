@@ -127,6 +127,14 @@ video_compiler/
 
 > Pixel engine throughput only. End-to-end speed is bounded by ffmpeg encoding and network I/O.
 
+### End-to-End Throughput by File Type
+
+<p align="center">
+  <img src="static/benchmark.png" alt="Benchmark: file size vs processing time" width="800">
+</p>
+
+Processing time scales linearly with input size. Compressible formats (.txt, .json) stay fast because gzip shrinks the archive before encoding. Incompressible formats (.bmp, .db) show steeper growth since their full size must be encoded into video frames.
+
 ### v3 vs v2
 
 | | v2 | v3 |
