@@ -14,35 +14,113 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Codec constants
 # ---------------------------------------------------------------------------
-BLOCK_SIZE    = 4
 FRAME_WIDTH   = 1920
 FRAME_HEIGHT  = 1080
 FPS           = 30
+SYNC_ROWS     = 2
 SAMPLE_MARGIN = 1          # pixels inset from each block edge when sampling
 THRESHOLD     = 128        # v2 1-bpp threshold (kept for back-compat decode)
 
-# ── Y (luma) plane ──────────────────────────────────────────────────────────
-BLOCKS_X      = FRAME_WIDTH  // BLOCK_SIZE   # 480
-BLOCKS_Y      = FRAME_HEIGHT // BLOCK_SIZE   # 270
-SYNC_ROWS     = 2
-DATA_ROWS     = BLOCKS_Y - SYNC_ROWS         # 268
-
-BPP_Y         = 3          # bits per block on Y plane (8 gray levels)
-BPP_C         = 2          # bits per block on Cb/Cr planes (4 gray levels)
-
-# ── Cb/Cr (chroma) planes — each is half the Y size due to 4:2:0 ────────────
 CHROMA_W      = FRAME_WIDTH  // 2            # 960
 CHROMA_H      = FRAME_HEIGHT // 2            # 540
-BLOCKS_X_C    = CHROMA_W // BLOCK_SIZE       # 240
-BLOCKS_Y_C    = CHROMA_H // BLOCK_SIZE       # 135
-DATA_ROWS_C   = BLOCKS_Y_C - SYNC_ROWS       # 133
 
-# ── Data capacity per frame ─────────────────────────────────────────────────
-BITS_PER_FRAME_Y  = BLOCKS_X   * DATA_ROWS   * BPP_Y   # 385,920
-BITS_PER_FRAME_C  = BLOCKS_X_C * DATA_ROWS_C * BPP_C   # 63,840  (per chroma plane)
-BITS_PER_FRAME    = BITS_PER_FRAME_Y + 2 * BITS_PER_FRAME_C  # 513,600
-BYTES_PER_FRAME   = BITS_PER_FRAME // 8                 # 64,200
-# vs v3: 40,140 bytes/frame  →  1.6× improvement
+
+class Profile:
+    """A frame format: block size and bits per block, per plane.
+
+    Luma and chroma are separate sub-channels with very different survival
+    characteristics through YouTube's transcode, so they are configured
+    independently rather than sharing one block size.
+    """
+
+    def __init__(self, block_y, bpp_y, block_c, bpp_c, name=''):
+        self.name = name
+        self.block_y, self.bpp_y = block_y, bpp_y
+        self.block_c, self.bpp_c = block_c, bpp_c
+
+        self.blocks_x   = FRAME_WIDTH  // block_y
+        self.data_rows  = FRAME_HEIGHT // block_y - SYNC_ROWS
+        self.blocks_x_c = CHROMA_W // block_c
+        self.data_rows_c = CHROMA_H // block_c - SYNC_ROWS
+
+        self.bits_y = self.blocks_x   * self.data_rows   * bpp_y
+        self.bits_c = self.blocks_x_c * self.data_rows_c * bpp_c
+        self.bits   = self.bits_y + 2 * self.bits_c
+        self.bytes  = self.bits // 8
+
+        # The packed fast path requires each plane to start on a byte boundary
+        # so parallel frames and planes never share an output byte.
+        assert self.bits % 8 == 0 and self.bits_y % 8 == 0 \
+            and self.bits_c % 8 == 0, \
+            f'profile {name} is not byte-aligned'
+
+        self.plane_bit_offsets = (0, self.bits_y, self.bits_y + self.bits_c)
+
+    def __repr__(self):
+        return (f'Profile({self.name}: Y {self.block_y}px/{self.bpp_y}bpp + '
+                f'C {self.block_c}px/{self.bpp_c}bpp = {self.bytes:,} B/frame)')
+
+
+# ── The v5 formats ──────────────────────────────────────────────────────────
+#
+# Chosen from measurements against real YouTube, not from theory. Three probe
+# uploads (bench/diag_youtube_formats.py) measured per-plane error rates for a
+# ladder of formats after YouTube's own transcode, and found:
+#
+#   * Chroma is far more robust than luma. It came back bit-perfect at every
+#     density tried up to 3 bits per block, while luma broke between 2 and 3.
+#     v4 failed for exactly one reason: 3 bpp on the luma plane.
+#   * What luma needs is contrast, not area: 2x2 blocks at 1 bit per block
+#     (pure black and white) survived with zero errors, while 4x4 blocks at
+#     3 bpp did not.
+#
+# Density and upload size then pull in opposite directions. High-contrast 2x2
+# blocks carry the most payload per frame but are the most expensive thing a
+# video codec can be asked to represent, so the frames themselves get much
+# bigger (bench/bench_profile_size.py):
+#
+#   Y4/2 + C4/3    56,100 B/frame   2.34x expansion   BER 1.1e-05
+#   Y4/2 + C2/2    96,480 B/frame   3.15x expansion   BER 4.3e-07
+#   Y2/1 + C2/2   128,880 B/frame   4.81x expansion   BER 1.6e-07
+#
+# End-to-end time is dominated by bytes on the wire, not by frame count: on a
+# 12 Mbit/s uplink the extra frames of the sparse profile cost well under a
+# second of CPU, while the extra bytes of the dense one cost about thirteen
+# seconds of upload for the same 8 MB payload. So the default optimises for
+# total bytes, and the dense profile is offered for the case where frame count
+# genuinely matters -- fitting a very large archive inside YouTube's per-video
+# duration limit.
+PROFILE_V5 = Profile(block_y=4, bpp_y=2, block_c=4, bpp_c=3, name='v5')
+
+# Maximum payload per frame. 2.3x the bytes per frame of the default, at
+# roughly twice the uploaded size for the same payload.
+PROFILE_DENSE = Profile(block_y=2, bpp_y=1, block_c=2, bpp_c=2, name='v5-dense')
+
+# v4, kept so existing uploads still decode. Measured at a 3.6e-02 bit error
+# rate through real YouTube, which RS cannot repair -- v4 videos that were
+# already damaged on upload are not recoverable, but undamaged ones decode.
+PROFILE_V4 = Profile(block_y=4, bpp_y=3, block_c=4, bpp_c=2, name='v4')
+PROFILE_V3 = Profile(block_y=4, bpp_y=2, block_c=4, bpp_c=1, name='v3')
+
+# The header frame is written in a deliberately sparse format: it has to be
+# readable before the profile it describes is known, so it cannot depend on it.
+# Y 4px/1bpp measured zero errors through YouTube.
+PROFILE_HEADER = Profile(block_y=4, bpp_y=1, block_c=4, bpp_c=1, name='header')
+
+DEFAULT_PROFILE = PROFILE_V5
+
+# Module-level aliases for the active profile (many call sites read these).
+BLOCK_SIZE        = DEFAULT_PROFILE.block_y
+BPP_Y             = DEFAULT_PROFILE.bpp_y
+BPP_C             = DEFAULT_PROFILE.bpp_c
+BLOCKS_X          = DEFAULT_PROFILE.blocks_x
+DATA_ROWS         = DEFAULT_PROFILE.data_rows
+BLOCKS_X_C        = DEFAULT_PROFILE.blocks_x_c
+DATA_ROWS_C       = DEFAULT_PROFILE.data_rows_c
+BITS_PER_FRAME_Y  = DEFAULT_PROFILE.bits_y
+BITS_PER_FRAME_C  = DEFAULT_PROFILE.bits_c
+BITS_PER_FRAME    = DEFAULT_PROFILE.bits          # 1,031,040
+BYTES_PER_FRAME   = DEFAULT_PROFILE.bytes         # 128,880
 
 # ── Frame byte sizes (raw pixel counts) ─────────────────────────────────────
 Y_PLANE_BYTES  = FRAME_WIDTH * FRAME_HEIGHT      # 2 073 600
@@ -59,14 +137,19 @@ LEVELS_3BPP = np.array([0, 36, 73, 109, 146, 182, 219, 255], dtype=np.uint8)  # 
 NROOTS        = 40
 CHUNK_IN      = 255 - NROOTS               # 215
 
-# v4 format
-MAGIC         = b'VIDCMPR4'
-HEADER_FORMAT = '<8sIIIIBBBBBBIxx'
+# v5 format — carries a block size per plane, since luma and chroma now differ
+MAGIC         = b'VIDCMPR5'
+HEADER_FORMAT = '<8sIIIIBBBBBBBIx'
 # magic(8) archive_size(4) num_data_frames(4) encoded_size(4) crc32(4)
-# nroots(1) block_size(1) fps(1) bpp_y(1) bpp_c(1) planes(1) audio_bytes(4) pad(2)
-# = 36 bytes
+# nroots(1) block_y(1) block_c(1) fps(1) bpp_y(1) bpp_c(1) planes(1)
+# audio_bytes(4) pad(1)  = 36 bytes
 HEADER_SIZE   = struct.calcsize(HEADER_FORMAT)   # 36
 HEADER_REPEAT = 5     # 5 copies × majority vote — tolerates 2 fully-corrupted copies
+
+# v4 legacy magic
+MAGIC_V4      = b'VIDCMPR4'
+HEADER_FORMAT_V4 = '<8sIIIIBBBBBBIxx'
+HEADER_SIZE_V4   = struct.calcsize(HEADER_FORMAT_V4)
 
 # v3 legacy magic
 MAGIC_V3      = b'VIDCMPR3'
@@ -129,24 +212,30 @@ _PC = _params(BLOCK_SIZE, CHROMA_W,    CHROMA_H,     BPP_C)    # Cb/Cr planes
 # ---------------------------------------------------------------------------
 
 def pack_header(archive_size, num_data_frames, encoded_size, crc32,
-                audio_bytes: int = 0) -> bytes:
+                audio_bytes: int = 0, profile: 'Profile' = None) -> bytes:
+    p = profile or DEFAULT_PROFILE
     raw = struct.pack(HEADER_FORMAT,
                       MAGIC, archive_size, num_data_frames, encoded_size, crc32,
-                      NROOTS, BLOCK_SIZE, FPS,
-                      BPP_Y, BPP_C, 3,   # bpp_y, bpp_c, planes (3 = YUV)
+                      NROOTS, p.block_y, p.block_c, FPS,
+                      p.bpp_y, p.bpp_c, 3,   # planes (3 = YUV)
                       audio_bytes)
     assert len(raw) == HEADER_SIZE
     return raw
 
 
 def unpack_header(raw: bytes) -> dict:
-    """Parse a v2, v3, or v4 header. Always returns a unified dict."""
+    """Parse a v2, v3, v4, or v5 header. Always returns a unified dict.
+
+    `block_y` and `block_c` are always present; older versions used a single
+    block size for both planes, so both fields carry it.
+    """
     magic = raw[:8]
     if magic == MAGIC_V2:
         sz = HEADER_SIZE_V2
         magic, arch, ndf, enc, crc, nr, bs, fps = struct.unpack(HEADER_FORMAT_V2, raw[:sz])
         return dict(magic=magic, archive_size=arch, num_data_frames=ndf,
                     encoded_size=enc, crc32=crc, nroots=nr, block_size=bs,
+                    block_y=bs, block_c=bs,
                     fps=fps, bpp_y=1, bpp_c=0, planes=1, audio_bytes=0)
     if magic == MAGIC_V3:
         sz = HEADER_SIZE_V3
@@ -154,15 +243,31 @@ def unpack_header(raw: bytes) -> dict:
             struct.unpack(HEADER_FORMAT_V3, raw[:sz])
         return dict(magic=magic, archive_size=arch, num_data_frames=ndf,
                     encoded_size=enc, crc32=crc, nroots=nr, block_size=bs,
+                    block_y=bs, block_c=bs,
                     fps=fps, bpp_y=bpy, bpp_c=1, planes=planes, audio_bytes=abytes)
-    if magic == MAGIC:
-        sz = HEADER_SIZE
+    if magic == MAGIC_V4:
+        sz = HEADER_SIZE_V4
         magic, arch, ndf, enc, crc, nr, bs, fps, bpy, bpc, planes, abytes = \
-            struct.unpack(HEADER_FORMAT, raw[:sz])
+            struct.unpack(HEADER_FORMAT_V4, raw[:sz])
         return dict(magic=magic, archive_size=arch, num_data_frames=ndf,
                     encoded_size=enc, crc32=crc, nroots=nr, block_size=bs,
+                    block_y=bs, block_c=bs,
+                    fps=fps, bpp_y=bpy, bpp_c=bpc, planes=planes, audio_bytes=abytes)
+    if magic == MAGIC:
+        sz = HEADER_SIZE
+        magic, arch, ndf, enc, crc, nr, by, bc, fps, bpy, bpc, planes, abytes = \
+            struct.unpack(HEADER_FORMAT, raw[:sz])
+        return dict(magic=magic, archive_size=arch, num_data_frames=ndf,
+                    encoded_size=enc, crc32=crc, nroots=nr, block_size=by,
+                    block_y=by, block_c=bc,
                     fps=fps, bpp_y=bpy, bpp_c=bpc, planes=planes, audio_bytes=abytes)
     raise ValueError(f'Unknown header magic: {magic!r}')
+
+
+def profile_from_header(h: dict) -> Profile:
+    """The frame format a decoded header describes."""
+    return Profile(h['block_y'], h['bpp_y'], h['block_c'],
+                   max(1, h['bpp_c']), name=h['magic'].decode(errors='replace'))
 
 # ---------------------------------------------------------------------------
 # Sidecar header (carried in the video description)
@@ -373,26 +478,27 @@ def _check_sync(frames: np.ndarray, p: dict,
 # High-level encode: bits → YUV frames (packed as flat bytes per YUV frame)
 # ---------------------------------------------------------------------------
 
-def bits_to_yuv_frames(bits_flat: np.ndarray, block_size: int = BLOCK_SIZE) -> np.ndarray:
+def bits_to_yuv_frames(bits_flat: np.ndarray,
+                       profile: Profile = None) -> np.ndarray:
     """
     Encode a flat 0/1 bit array into N YUV 4:2:0 frames packed as a
     (N, YUV_FRAME_BYTES) uint8 array.
 
-    bits_flat : length = N * BITS_PER_FRAME
+    bits_flat : length = N * profile.bits
     Returns   : (N, YUV_FRAME_BYTES) uint8
     """
-    py = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, BPP_Y)
-    pc = _params(block_size, CHROMA_W,    CHROMA_H,     BPP_C)
+    prof = profile or DEFAULT_PROFILE
+    py, pc, _ = _plane_params(prof)
 
-    N = len(bits_flat) // BITS_PER_FRAME
+    N = len(bits_flat) // prof.bits
 
-    bpf_y = py['bpf']   # 257 280
-    bpf_c = pc['bpf']   # 31 920
+    bpf_y = py['bpf']
+    bpf_c = pc['bpf']
 
-    flat = bits_flat[:N * BITS_PER_FRAME]
-    y_bits  = flat.reshape(N, BITS_PER_FRAME)[:, :bpf_y].reshape(-1)
-    cb_bits = flat.reshape(N, BITS_PER_FRAME)[:, bpf_y:bpf_y+bpf_c].reshape(-1)
-    cr_bits = flat.reshape(N, BITS_PER_FRAME)[:, bpf_y+bpf_c:].reshape(-1)
+    flat = bits_flat[:N * prof.bits]
+    y_bits  = flat.reshape(N, prof.bits)[:, :bpf_y].reshape(-1)
+    cb_bits = flat.reshape(N, prof.bits)[:, bpf_y:bpf_y+bpf_c].reshape(-1)
+    cr_bits = flat.reshape(N, prof.bits)[:, bpf_y+bpf_c:].reshape(-1)
 
     Y_frames  = _encode_plane(y_bits,  py)    # (N, 1080, 1920)
     Cb_frames = _encode_plane(cb_bits, pc)    # (N, 540,  960)
@@ -407,15 +513,15 @@ def bits_to_yuv_frames(bits_flat: np.ndarray, block_size: int = BLOCK_SIZE) -> n
 
 
 def yuv_frames_to_bits(yuv_frames: np.ndarray,
-                       block_size: int = BLOCK_SIZE) -> np.ndarray:
+                       profile: Profile = None) -> np.ndarray:
     """
     Decode YUV frames back to a flat bit array.
 
     yuv_frames : (N, YUV_FRAME_BYTES) uint8
-    Returns    : (N, BITS_PER_FRAME) uint8
+    Returns    : (N, profile.bits) uint8
     """
-    py = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, BPP_Y)
-    pc = _params(block_size, CHROMA_W,    CHROMA_H,     BPP_C)
+    prof = profile or DEFAULT_PROFILE
+    py, pc, _ = _plane_params(prof)
     N  = len(yuv_frames)
 
     Y_frames  = yuv_frames[:, :Y_PLANE_BYTES].reshape(N, FRAME_HEIGHT, FRAME_WIDTH)
@@ -442,13 +548,6 @@ def yuv_frames_to_bits(yuv_frames: np.ndarray,
 # what makes the C layer's per-frame parallelism safe: no two frames, and no
 # two planes, ever touch the same output byte.
 
-_PLANE_BIT_OFFSETS = (0, BITS_PER_FRAME_Y, BITS_PER_FRAME_Y + BITS_PER_FRAME_C)
-
-assert BITS_PER_FRAME % 8 == 0, 'frame bit stride must be byte-aligned'
-assert all(o % 8 == 0 for o in _PLANE_BIT_OFFSETS), \
-    'each plane must start on a byte boundary'
-
-
 def pad_for_packed(data: bytes | np.ndarray) -> np.ndarray:
     """Copy `data` into a uint8 array with the slack the C bit reader needs."""
     arr = np.frombuffer(data, dtype=np.uint8) if isinstance(data, (bytes, bytearray)) \
@@ -458,32 +557,38 @@ def pad_for_packed(data: bytes | np.ndarray) -> np.ndarray:
     return out
 
 
+def _plane_params(profile: Profile):
+    """(Y, Cb, Cr) parameter dicts for a profile."""
+    py = _params(profile.block_y, FRAME_WIDTH, FRAME_HEIGHT, profile.bpp_y)
+    pc = _params(profile.block_c, CHROMA_W,    CHROMA_H,     profile.bpp_c)
+    return py, pc, pc
+
+
 def packed_to_yuv_frames(src: np.ndarray, n_frames: int,
                          first_frame: int = 0,
-                         block_size: int = BLOCK_SIZE) -> np.ndarray:
+                         profile: Profile = None) -> np.ndarray:
     """Encode packed payload bytes directly into (n, YUV_FRAME_BYTES) frames.
 
     `src` must come from pad_for_packed(). `first_frame` selects where in the
     stream this batch starts, so batches can be produced without re-slicing.
     """
+    p = profile or DEFAULT_PROFILE
     if not PACKED_AVAILABLE:
-        start = first_frame * BITS_PER_FRAME
+        start = first_frame * p.bits
         bits = np.unpackbits(src[:-PACK_PAD] if PACK_PAD else src)
-        seg = bits[start:start + n_frames * BITS_PER_FRAME]
-        if len(seg) < n_frames * BITS_PER_FRAME:
+        seg = bits[start:start + n_frames * p.bits]
+        if len(seg) < n_frames * p.bits:
             seg = np.concatenate(
-                [seg, np.zeros(n_frames * BITS_PER_FRAME - len(seg), np.uint8)])
-        return bits_to_yuv_frames(seg, block_size=block_size)
+                [seg, np.zeros(n_frames * p.bits - len(seg), np.uint8)])
+        return bits_to_yuv_frames(seg, profile=p)
 
-    py = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, BPP_Y)
-    pc = _params(block_size, CHROMA_W,    CHROMA_H,     BPP_C)
-    base = first_frame * BITS_PER_FRAME
-
+    base = first_frame * p.bits
     planes = []
-    for p, off in zip((py, pc, pc), _PLANE_BIT_OFFSETS):
+    for pp, off in zip(_plane_params(p), p.plane_bit_offsets):
         planes.append(encode_plane_packed_c(
-            src, base + off, BITS_PER_FRAME, n_frames,
-            p['ph'], p['pw'], p['bs'], p['bx'], p['dr'], SYNC_ROWS, p['bpp']))
+            src, base + off, p.bits, n_frames,
+            pp['ph'], pp['pw'], pp['bs'], pp['bx'], pp['dr'], SYNC_ROWS,
+            pp['bpp']))
 
     out = np.empty((n_frames, YUV_FRAME_BYTES), dtype=np.uint8)
     out[:, :Y_PLANE_BYTES] = planes[0].reshape(n_frames, -1)
@@ -493,15 +598,13 @@ def packed_to_yuv_frames(src: np.ndarray, n_frames: int,
 
 
 def yuv_frames_to_packed(yuv_frames: np.ndarray,
-                         block_size: int = BLOCK_SIZE) -> np.ndarray:
-    """Decode frames straight to packed bytes, (n * BYTES_PER_FRAME,) uint8."""
+                         profile: Profile = None) -> np.ndarray:
+    """Decode frames straight to packed bytes, (n * profile.bytes,) uint8."""
+    p = profile or DEFAULT_PROFILE
     n = len(yuv_frames)
     if not PACKED_AVAILABLE:
-        bits = yuv_frames_to_bits(yuv_frames, block_size=block_size)
+        bits = yuv_frames_to_bits(yuv_frames, profile=p)
         return np.packbits(bits.reshape(-1))
-
-    py = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, BPP_Y)
-    pc = _params(block_size, CHROMA_W,    CHROMA_H,     BPP_C)
 
     Y  = yuv_frames[:, :Y_PLANE_BYTES].reshape(n, FRAME_HEIGHT, FRAME_WIDTH)
     Cb = yuv_frames[:, Y_PLANE_BYTES:Y_PLANE_BYTES + CB_PLANE_BYTES] \
@@ -509,13 +612,14 @@ def yuv_frames_to_packed(yuv_frames: np.ndarray,
     Cr = yuv_frames[:, Y_PLANE_BYTES + CB_PLANE_BYTES:] \
         .reshape(n, CHROMA_H, CHROMA_W)
 
-    out = np.zeros(n * BYTES_PER_FRAME + PACK_PAD, dtype=np.uint8)
-    for frames, p, off in zip((Y, Cb, Cr), (py, pc, pc), _PLANE_BIT_OFFSETS):
+    out = np.zeros(n * p.bytes + PACK_PAD, dtype=np.uint8)
+    for frames, pp, off in zip((Y, Cb, Cr), _plane_params(p),
+                               p.plane_bit_offsets):
         decode_plane_packed_c(
-            frames, out, off, BITS_PER_FRAME,
-            p['ph'], p['pw'], p['bs'], p['bx'], p['dr'], SYNC_ROWS,
-            p['bpp'], p['m'])
-    return out[:n * BYTES_PER_FRAME]
+            frames, out, off, p.bits,
+            pp['ph'], pp['pw'], pp['bs'], pp['bx'], pp['dr'], SYNC_ROWS,
+            pp['bpp'], pp['m'])
+    return out[:n * p.bytes]
 
 
 # ---------------------------------------------------------------------------
@@ -523,12 +627,13 @@ def yuv_frames_to_packed(yuv_frames: np.ndarray,
 # ---------------------------------------------------------------------------
 
 def check_sync_yuv(yuv_frames: np.ndarray,
-                   block_size: int = BLOCK_SIZE) -> np.ndarray:
+                   profile: Profile = None) -> np.ndarray:
     """
     Return (N,) bool: True where the Y plane of a YUV frame has a valid sync.
     Only the Y plane is checked (it is the most reliable after compression).
     """
-    py = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, BPP_Y)
+    prof = profile or DEFAULT_PROFILE
+    py, _, _ = _plane_params(prof)
     N  = len(yuv_frames)
     Y  = yuv_frames[:, :Y_PLANE_BYTES].reshape(N, FRAME_HEIGHT, FRAME_WIDTH)
     return _check_sync(Y, py)
@@ -539,29 +644,36 @@ def check_sync_yuv(yuv_frames: np.ndarray,
 # ---------------------------------------------------------------------------
 
 def header_to_yuv_frame(header_raw: bytes,
-                        block_size: int = BLOCK_SIZE) -> np.ndarray:
-    """Return a single YUV frame (YUV_FRAME_BYTES,) encoding the header."""
+                        profile: Profile = None) -> np.ndarray:
+    """Return a single YUV frame (YUV_FRAME_BYTES,) encoding the header.
+
+    Always written in PROFILE_HEADER, never the payload profile: the decoder
+    has to read this frame *before* it knows what format the payload uses, so
+    the header frame cannot be encoded in the format it describes.
+    """
+    prof     = profile or PROFILE_HEADER
     data     = header_raw * HEADER_REPEAT
     bits     = bytes_to_bits(data)
-    # Pad to one full frame
-    need     = BITS_PER_FRAME
+    need     = prof.bits
     if len(bits) < need:
         bits = np.concatenate([bits, np.zeros(need - len(bits), dtype=np.uint8)])
-    return bits_to_yuv_frames(bits[:need], block_size=block_size)[0]   # (YUV_FRAME_BYTES,)
+    return bits_to_yuv_frames(bits[:need], profile=prof)[0]
 
 
 def yuv_frame_to_header(yuv_frame: np.ndarray,
-                        block_size: int = BLOCK_SIZE) -> dict:
-    """Decode header from a single YUV frame, majority-voting across copies.
+                        profile: Profile = None) -> dict:
+    """Decode a header from a single YUV frame, majority-voting across copies.
 
-    Tries both v3 and v2 header sizes since individual copies may have byte
-    errors that corrupt the magic before we majority-vote.
+    Tries every known header size, since individual copies may have byte errors
+    that corrupt the magic before the vote resolves it.
     """
+    prof  = profile or PROFILE_HEADER
     row   = yuv_frame[np.newaxis]           # (1, YUV_FRAME_BYTES)
-    bits  = yuv_frames_to_bits(row, block_size=block_size)[0]
+    bits  = yuv_frames_to_bits(row, profile=prof)[0]
     raw   = bits_to_bytes(bits)
 
-    for hs, expected_magic in [(HEADER_SIZE, MAGIC), (HEADER_SIZE_V3, MAGIC_V3),
+    for hs, expected_magic in [(HEADER_SIZE, MAGIC), (HEADER_SIZE_V4, MAGIC_V4),
+                               (HEADER_SIZE_V3, MAGIC_V3),
                                (HEADER_SIZE_V2, MAGIC_V2)]:
         copies = [raw[k * hs:(k + 1) * hs] for k in range(HEADER_REPEAT)]
         hb = bytearray(hs)
@@ -578,25 +690,27 @@ def yuv_frame_to_header(yuv_frame: np.ndarray,
 # v2 back-compat shims (used by the decoder when it sees a VIDCMPR2 video)
 # ---------------------------------------------------------------------------
 
-# The v2 decoder used grayscale frames with 1-bpp.
-# We expose the old API so video_decoder.py can import it for v2 videos.
+# The v2 decoder used grayscale frames with 1-bpp and 4x4 blocks. These keep
+# their own block-size default rather than following the current profile,
+# whose geometry has nothing to do with the legacy format.
+V2_BLOCK_SIZE = 4
 
 def bits_to_frames_batch(bits_flat: np.ndarray,
-                         block_size: int = BLOCK_SIZE) -> np.ndarray:
+                         block_size: int = V2_BLOCK_SIZE) -> np.ndarray:
     """v2 compat: 1-bpp grayscale frames. Returns (N, H, W) uint8."""
     p = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, 1)
     return _encode_plane_np(bits_flat, p)
 
 
 def frames_to_bits_batch(frames: np.ndarray,
-                         block_size: int = BLOCK_SIZE) -> np.ndarray:
+                         block_size: int = V2_BLOCK_SIZE) -> np.ndarray:
     """v2 compat: decode 1-bpp grayscale frames. Returns (N, bpf) uint8."""
     p = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, 1)
     return _decode_plane_np(frames, p)
 
 
 def check_sync_batch(frames: np.ndarray,
-                     block_size: int = BLOCK_SIZE,
+                     block_size: int = V2_BLOCK_SIZE,
                      min_accuracy: float = 0.75) -> np.ndarray:
     """v2 compat: sync check on grayscale frames."""
     p = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, 1)
@@ -604,7 +718,7 @@ def check_sync_batch(frames: np.ndarray,
 
 
 def decode_header_frame(frame: np.ndarray,
-                        block_size: int = BLOCK_SIZE) -> dict:
+                        block_size: int = V2_BLOCK_SIZE) -> dict:
     """v2 compat: decode a single grayscale header frame."""
     bits   = frames_to_bits_batch(frame[np.newaxis], block_size=block_size)[0]
     raw    = bits_to_bytes(bits)
@@ -617,7 +731,7 @@ def decode_header_frame(frame: np.ndarray,
     return unpack_header(bytes(hb))
 
 
-def bits_to_frame(bits, block_size: int = BLOCK_SIZE) -> np.ndarray:
+def bits_to_frame(bits, block_size: int = V2_BLOCK_SIZE) -> np.ndarray:
     """v2 compat: encode a single 1-bpp grayscale frame. Returns (H, W) uint8."""
     p   = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, 1)
     return _encode_plane_np(bits[:p['bpf']], p)[0]

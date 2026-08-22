@@ -29,6 +29,7 @@ from video_codec import (
     pack_header, bytes_to_bits, encode_sidecar,
     bits_to_yuv_frames, header_to_yuv_frame,
     pad_for_packed, packed_to_yuv_frames,
+    DEFAULT_PROFILE, PROFILE_HEADER,
     NATIVE_AVAILABLE, PACKED_AVAILABLE, NATIVE_THREADS,
 )
 import audio_codec as _ac

@@ -25,15 +25,23 @@ from video_codec import (
     NROOTS, CHUNK_IN, FPS,
     HEADER_SIZE, HEADER_REPEAT,
     MAGIC, MAGIC_V3, MAGIC_V2,
+    MAGIC_V4,
     unpack_header, bits_to_bytes, decode_sidecar,
     yuv_frames_to_bits, yuv_frames_to_packed,
-    check_sync_yuv, yuv_frame_to_header,
+    check_sync_yuv, yuv_frame_to_header, profile_from_header,
+    Profile, PROFILE_HEADER, PROFILE_V4, PROFILE_V3, DEFAULT_PROFILE,
     # v2 compat
     check_sync_batch, frames_to_bits_batch, decode_header_frame,
     NATIVE_AVAILABLE, PACKED_AVAILABLE, NATIVE_THREADS,
 )
 
 _CANDIDATE_BLOCK_SIZES = [4, 16]
+
+# Profiles the header frame might be written in. v5 always uses PROFILE_HEADER;
+# v4 and v3 wrote the header frame in their own payload format.
+_HEADER_PROFILES = [PROFILE_HEADER, PROFILE_V4, PROFILE_V3]
+
+_V5_MAGICS = (MAGIC, MAGIC_V4, MAGIC_V3)
 
 # ---------------------------------------------------------------------------
 # Reed-Solomon decode  (galois – numba-JIT vectorised)
@@ -280,13 +288,12 @@ def decode_video_to_files(video_path: str, output_dir: str, progress=None,
     header = decode_sidecar(description)
     if header is not None:
         version = 2 if header['magic'] == MAGIC_V2 else 3
-        block_size = header['block_size']
         log('Header recovered from the video description.')
     else:
-        # ── Detect v2 (gray) vs v4/v3 (yuv420p) from the opening frames ──
+        # ── Detect v2 (gray) vs v5/v4/v3 (yuv420p) from the opening frames ──
         log('Detecting video format...')
         try:
-            version, header, block_size = _detect_version(video_path, log)
+            version, header, _hdr_profile = _detect_version(video_path, log)
         except RuntimeError:
             # Last resort: the header backup carried in the audio track.
             header = header_from_audio(video_path)
@@ -294,15 +301,18 @@ def decode_video_to_files(video_path: str, output_dir: str, progress=None,
                 raise
             log('Header recovered from the audio channel.')
             version = 2 if header['magic'] == MAGIC_V2 else 3
-            block_size = header['block_size']
-    fmt_label = {3: f'v{header["magic"][-1:].decode()} YUV {header["bpp_y"]}-bpp Y + {header["bpp_c"]}-bpp C',
-                 2: 'v2 grayscale 1-bpp'}
-    log(f'Format: {fmt_label[version]}  (block_size={block_size})')
 
     if version == 3:
-        return _decode_v3(video_path, header, block_size, output_dir, log)
+        profile = profile_from_header(header)
+        log(f'Format: {header["magic"].decode()}  '
+            f'Y {profile.block_y}px/{profile.bpp_y}bpp + '
+            f'C {profile.block_c}px/{profile.bpp_c}bpp  '
+            f'({profile.bytes:,} bytes/frame)')
+        return _decode_v3(video_path, header, profile, output_dir, log)
     else:
-        return _decode_v2(video_path, header, block_size, output_dir, log)
+        log(f'Format: v2 grayscale 1-bpp (block_size={header["block_size"]})')
+        return _decode_v2(video_path, header, header['block_size'],
+                          output_dir, log)
 
 
 # ---------------------------------------------------------------------------
@@ -386,19 +396,30 @@ def _detect_version(video_path: str, log):
     )
 
 
-def _try_find_header_v3(batch: np.ndarray):
-    """Try to find and decode a v4/v3 header in a batch of YUV frames."""
-    for bs in _CANDIDATE_BLOCK_SIZES:
-        sync_mask = check_sync_yuv(batch, block_size=bs)
+def _find_header_frame(batch: np.ndarray):
+    """Find and decode a v5/v4/v3 header frame in a batch of YUV frames.
+
+    Returns (header dict, header profile, frame index within the batch), or
+    (None, None, None). The header frame's own format is not the payload
+    format -- v5 writes it in a deliberately sparse profile so it can be read
+    before the payload format is known.
+    """
+    for prof in _HEADER_PROFILES:
+        sync_mask = check_sync_yuv(batch, profile=prof)
         for i in np.where(sync_mask)[0]:
             try:
-                frame_row = batch[i:i+1]   # (1, YUV_FRAME_BYTES)
-                h = yuv_frame_to_header(frame_row[0], block_size=bs)
-                if h['magic'] in (MAGIC, MAGIC_V3):
-                    return h, bs
+                h = yuv_frame_to_header(batch[i], profile=prof)
+                if h['magic'] in _V5_MAGICS:
+                    return h, prof, int(i)
             except Exception:
                 continue
-    return None, None
+    return None, None, None
+
+
+def _try_find_header_v3(batch: np.ndarray):
+    """Back-compat wrapper returning just (header, profile)."""
+    h, prof, _ = _find_header_frame(batch)
+    return h, prof
 
 
 def _try_find_header_v2(batch: np.ndarray):
@@ -419,7 +440,7 @@ def _try_find_header_v2(batch: np.ndarray):
 # v3 decode
 # ---------------------------------------------------------------------------
 
-def _decode_v3(video_path: str, header: dict, block_size: int,
+def _decode_v3(video_path: str, header: dict, profile,
                output_dir: str, log) -> list:
     frame_bytes     = YUV_FRAME_BYTES
     num_data_frames = header['num_data_frames']
@@ -437,23 +458,16 @@ def _decode_v3(video_path: str, header: dict, block_size: int,
 
     for batch_start, batch in source:
         if not found_header:
-            sync_mask = check_sync_yuv(batch, block_size=block_size)
-            for i in np.where(sync_mask)[0]:
-                try:
-                    h = yuv_frame_to_header(batch[i], block_size=block_size)
-                    if h['magic'] in (MAGIC, MAGIC_V3):
-                        found_header = True
-                        tail = batch[i + 1:]
-                        if len(tail):
-                            byte_chunks.append(
-                                yuv_frames_to_packed(tail, block_size))
-                            frames_read += len(tail)
-                        break
-                except Exception:
-                    continue
+            h, _prof, idx = _find_header_frame(batch)
+            if h is not None:
+                found_header = True
+                tail = batch[idx + 1:]
+                if len(tail):
+                    byte_chunks.append(yuv_frames_to_packed(tail, profile))
+                    frames_read += len(tail)
             continue
 
-        byte_chunks.append(yuv_frames_to_packed(batch, block_size))
+        byte_chunks.append(yuv_frames_to_packed(batch, profile))
         frames_read += len(batch)
 
         if frames_read % (DECODE_BATCH * 10) == 0:

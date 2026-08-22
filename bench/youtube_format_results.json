@@ -1,0 +1,100 @@
+{
+  "video_id": "VAwfxV0F2jY",
+  "url": "https://www.youtube.com/watch?v=VAwfxV0F2jY",
+  "rows": [
+    {
+      "label": "Y 8px/1bpp  no chroma",
+      "bytes": 3990,
+      "ber": 0.0,
+      "per": {
+        "Y": 0.0
+      }
+    },
+    {
+      "label": "Y 8px/2bpp + C 8px/1bpp",
+      "bytes": 9930,
+      "ber": 0.0,
+      "per": {
+        "Y": 0.0,
+        "Cb": 0.0,
+        "Cr": 0.0
+      }
+    },
+    {
+      "label": "Y 8px/3bpp + C 8px/2bpp",
+      "bytes": 15870,
+      "ber": 0.0008290012602394454,
+      "per": {
+        "Y": 0.0010991019214703424,
+        "Cb": 0.0,
+        "Cr": 0.0
+      }
+    },
+    {
+      "label": "Y 4px/1bpp  no chroma",
+      "bytes": 16080,
+      "ber": 0.0,
+      "per": {
+        "Y": 0.0
+      }
+    },
+    {
+      "label": "Y 4px/1bpp + C 4px/1bpp",
+      "bytes": 24060,
+      "ber": 0.0,
+      "per": {
+        "Y": 0.0,
+        "Cb": 0.0,
+        "Cr": 0.0
+      }
+    },
+    {
+      "label": "Y 4px/2bpp  no chroma",
+      "bytes": 32160,
+      "ber": 2.5264303482587064e-05,
+      "per": {
+        "Y": 2.5264303482587064e-05
+      }
+    },
+    {
+      "label": "Y 4px/2bpp + C 4px/1bpp",
+      "bytes": 40140,
+      "ber": 2.1539196146819464e-05,
+      "per": {
+        "Y": 2.6883810116086237e-05,
+        "Cb": 0.0,
+        "Cr": 0.0
+      }
+    },
+    {
+      "label": "Y 4px/2bpp + C 4px/2bpp",
+      "bytes": 48120,
+      "ber": 2.251316154059296e-05,
+      "per": {
+        "Y": 3.368573797678275e-05,
+        "Cb": 0.0,
+        "Cr": 0.0
+      }
+    },
+    {
+      "label": "Y 4px/3bpp + C 4px/2bpp",
+      "bytes": 64200,
+      "ber": 0.03626476505711319,
+      "per": {
+        "Y": 0.048262809217799886,
+        "Cb": 0.0,
+        "Cr": 0.0
+      }
+    },
+    {
+      "label": "Y 4px/4bpp + C 4px/3bpp",
+      "bytes": 88260,
+      "ber": 0.1390647424276758,
+      "per": {
+        "Y": 0.1908248471185738,
+        "Cb": 0.0,
+        "Cr": 0.0
+      }
+    }
+  ]
+}
