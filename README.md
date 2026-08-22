@@ -3,7 +3,7 @@
   <p align="center">
     Store any file inside a YouTube video — and recover it perfectly.
     <br />
-    Survives YouTube's full H.264 re-compression pipeline.
+    Format verified by real upload/download round trips, not simulation.
   </p>
 </p>
 
@@ -27,7 +27,7 @@ Files  ←  untar   ←  RS error correction ←  YUV pixel decoding ←  H.264 
 
 1. **Archive** — Input files are packed into a `.tar.gz` archive with CRC-32 integrity check.
 2. **Error Correction** — The archive is split into 215-byte chunks, each protected with 40 bytes of Reed-Solomon parity (RS(255, 215)).
-3. **Pixel Encoding** — Corrected data is written into YUV 4:2:0 frames: 3 bits per block on the Y plane (8 gray levels) and 2 bits per block on the Cb/Cr chroma planes.
+3. **Pixel Encoding** — Corrected data is written into YUV 4:2:0 frames: 2 bits per 4x4 block on the Y plane and 3 bits per 4x4 block on the Cb/Cr chroma planes. The split is deliberate and measured — see *The v5 format* below.
 4. **Video Encoding** — Frames are piped to ffmpeg as raw YUV and encoded to H.264 with hardware acceleration (NVENC / QSV / AMF) or software fallback (libx264).
 5. **Side channels** — A copy of the header goes into the audio track as FSK tones *and* into the video description, so the decoder can recover the archive parameters three independent ways.
 6. **Upload** — The video is uploaded to YouTube as unlisted via the Data API v3.
@@ -39,6 +39,7 @@ Decoding reverses the pipeline: download → extract raw frames → decode pixel
 - **C native pixel engine**, multithreaded, operating directly on packed bits
 - **Hardware encoder auto-detection** — NVIDIA NVENC, Intel QSV, AMD AMF, or software libx264
 - **Three independent header channels** — pixels, FSK audio, and the video description
+- **Selectable density** — a `Profile` sets block size and bits per block independently per plane; the header records both, so any profile decodes
 - **Backward compatible** — decodes v4 (`VIDCMPR4`), v3 (`VIDCMPR3`), and legacy v2 (`VIDCMPR2`) videos
 - **Web UI** — drag-and-drop files, real-time progress via SSE, one-click decode
 
@@ -112,9 +113,9 @@ video_compiler/
 | Property | Value |
 |---|---|
 | Resolution | 1920 x 1080 (YUV 4:2:0) |
-| Block size | 4 x 4 px |
-| Bits per block | Y: 3 bpp (8 gray levels) / Cb, Cr: 2 bpp (4 gray levels) |
-| Data per frame | 64,200 bytes |
+| Block size | 4 x 4 px (both planes) |
+| Bits per block | Y: 2 bpp (4 levels) / Cb, Cr: 3 bpp (8 levels) |
+| Data per frame | 56,100 bytes (`PROFILE_DENSE`: 128,880) |
 | FPS | 30 |
 | Error correction | Reed-Solomon RS(255, 215) — 40 parity bytes/chunk |
 | Header redundancy | 5 in-frame copies + audio track + video description |
@@ -158,6 +159,31 @@ In throughput terms at 16 MB: encode went from 4.00 to 7.82 MB/s, decode from
 upload and download time is network-bound, not CPU-bound: on a 20 Mbit/s
 uplink, the 8 MB case spends ~19 s uploading under v4 against ~10 s under v5,
 which dwarfs the ~1 s of encode time either way.
+
+## Real YouTube round trips
+
+`bench/bench_youtube.py` runs the whole thing against the live service: encode,
+upload, wait for the 1080p rendition, download, decode, compare SHA-256. This
+is the only measurement that actually proves the format works.
+
+| stage | 8 MB payload |
+|---|---|
+| encode | 1.4 s → 25.28 MB video (3.16x) |
+| upload | 17.7 s (12.0 Mbit/s) |
+| YouTube processing to 1080p | 24 s |
+| download | 3.8 s (45.3 Mbit/s) — YouTube served 20.47 MB |
+| decode + error correction | 37.4 s |
+| **result** | **bytes identical** |
+
+Two things to note. YouTube returns a *smaller* file than was uploaded
+(20.47 MB against 25.28 MB) — it re-encodes everything, which is why the upload
+quantiser is nearly free to raise. And decode takes far longer here than in the
+local benchmark (37.4 s against 1.2 s) because real errors are present: the
+fast path is a parity strip plus CRC, and any error at all forces a full
+Reed-Solomon correction pass over the whole archive.
+
+The same script run against the v4 format failed at the last step, with the
+recovered data not matching after error correction.
 
 ## Where the gains came from
 
@@ -238,53 +264,71 @@ so splitting cannot change the result.
 
 ---
 
-# On packing more bits per frame
+# The v5 format, and why v4 had to change
 
-The short answer: **v5 does not increase bits per frame, because measurement
-says the current density is already at the edge of what the channel supports.**
-Raising it would trade guaranteed integrity for capacity.
+**The v4 format did not survive YouTube.** A real 8 MB round trip failed its
+integrity check after error correction. This was not a marginal failure: the
+luma plane came back with a 3.6e-02 bit error rate, far past what RS can
+repair. v4 had only ever been validated against our own encoder, which
+reproduces the blocks exactly and therefore proves nothing about the service.
 
-## Capacity is set by the delivered bitrate
+Three probe uploads then measured the real channel. Each test video is built
+from consecutive segments modulated at different densities, so a single round
+trip measures a whole ladder (`bench/diag_youtube_formats.py`).
 
-A format carrying *B* bytes/frame at 30 fps needs 240·*B* bit/s of
-*incompressible* payload to get through. No amount of error correction changes
-that. The current format needs **15.4 Mbit/s** of surviving payload — which is
-in the same range as what YouTube allocates to a 1080p30 stream in total.
+## What the real channel does
 
-`bench/capacity_curve.py` measures bit error rate for a ladder of formats
-against a ladder of simulated channel bitrates:
-
-| format | B/frame | Mbit/s needed | vp9 4M | avc 8M | avc 12M |
+| format | B/frame | overall | Y | Cb | Cr |
 |---|---|---|---|---|---|
-| Y 8px/2bpp + C 8px/1bpp | 9,930 | 2.4 | 0 | 4.6e-04 | 0 |
-| Y 8px/3bpp + C 8px/2bpp | 15,870 | 3.8 | 2.6e-03 | 8.4e-03 | 0 |
-| Y 4px/1bpp + C 4px/1bpp | 24,060 | 5.8 | 0 | 8.6e-02 | 1.6e-04 |
-| Y 4px/2bpp + C 4px/2bpp | 48,120 | 11.5 | 8.5e-03 | 1.5e-01 | 4.3e-02 |
-| **Y 4px/3bpp + C 4px/2bpp** (current) | **64,200** | **15.4** | 1.0e-01 | 2.4e-01 | 1.1e-01 |
-| Y 4px/4bpp + C 4px/3bpp | 88,260 | 21.2 | 1.8e-01 | 2.7e-01 | 2.0e-01 |
+| Y 8px/2bpp + C 8px/1bpp | 9,930 | 0 | 0 | 0 | 0 |
+| Y 4px/1bpp + C 4px/1bpp | 24,060 | 0 | 0 | 0 | 0 |
+| Y 4px/2bpp + C 4px/2bpp | 48,120 | 2.3e-05 | 3.4e-05 | 0 | 0 |
+| **Y 4px/3bpp + C 4px/2bpp** (v4) | **64,200** | **3.6e-02** | **4.8e-02** | 0 | 0 |
+| Y 4px/4bpp + C 4px/3bpp | 88,260 | 1.4e-01 | 1.9e-01 | 0 | 0 |
 
-Denser formats fail first, and they fail hard — RS(255,215) corrects roughly a
-7.8% byte error rate, so anything above ~1e-2 is unrecoverable.
+Two findings, neither of which the simulation predicted:
+
+1. **Chroma is far more robust than luma.** It came back *bit-perfect* at every
+   density tried, up to 3 bits per block. Every failure above is a luma
+   failure. v4 broke for exactly one reason: 3 bpp on the Y plane.
+2. **Luma needs contrast, not area.** 2x2 blocks at 1 bpp -- pure black and
+   white -- returned zero errors, while 4x4 blocks at 3 bpp did not. What
+   survives a transcode is the spacing between levels, not the size of a block.
+
+## Density and upload size pull opposite ways
+
+Following those findings upward gives formats carrying far more per frame. But
+high-contrast 2x2 blocks are the most expensive thing a video codec can be
+asked to represent, so the frames themselves get much bigger
+(`bench/bench_profile_size.py`):
+
+| profile | B/frame | expansion | YouTube BER |
+|---|---|---|---|
+| **Y 4px/2bpp + C 4px/3bpp** (default) | 56,100 | **2.34x** | 1.1e-05 |
+| Y 4px/2bpp + C 2px/2bpp | 96,480 | 3.15x | 4.3e-07 |
+| Y 2px/1bpp + C 2px/2bpp (`PROFILE_DENSE`) | 128,880 | 4.81x | 1.6e-07 |
+
+End-to-end time is dominated by bytes on the wire, not frame count. On the
+measured 12 Mbit/s uplink an 8 MB payload costs about 12.5 s of upload at 2.34x
+against 25.7 s at 4.81x, while the extra frames of the sparse profile cost well
+under a second of CPU. So **the default optimises for total bytes**, and
+`PROFILE_DENSE` is exposed for the case where frame count is what matters --
+fitting a very large archive inside YouTube's per-video duration limit.
+
+The default carries 87% of v4's bytes per frame, uploads *smaller* per payload
+byte than v4 did, and unlike v4 it actually round-trips.
 
 ## Things that were tried and did not work
 
-- **Smaller blocks.** 2x2 blocks quadruple the block count and do survive our
-  own encoder (`bench/sweep_format.py` measured 193,680 B/frame clean), but
-  they are the *first* thing a transcode destroys.
-- **More levels per block.** Same story: clean locally, worst survival.
-- **Adaptive demodulation.** `bench/sweep_adaptive.py` tested recalibrating the
-  slicer per frame from the observed level distribution, on the theory that the
-  transcode applies a gain/offset the fixed thresholds miss. It changed nothing
-  (1.65e-01 fixed vs 1.65e-01 adaptive). The damage is genuine per-block
-  information loss, not a correctable level shift — no decoder-side trick
-  recovers it.
-
-**Important caveat:** these transcode figures come from a *local simulation* of
-YouTube (ffmpeg libx264/libvpx-vp9 at YouTube-like rate targets), not from
-YouTube itself. The simulation is harsher than the real service — it fails the
-v4 format, which is reported to work in practice. Treat the table as a relative
-ranking of formats, not an absolute verdict. Settling it properly needs a real
-upload/download round trip.
+- **Adaptive demodulation.** `bench/sweep_adaptive.py` recalibrated the slicer
+  per frame from the observed level distribution, on the theory that the
+  transcode applies a gain shift the fixed thresholds miss. It changed nothing
+  (1.65e-01 fixed against 1.65e-01 adaptive) -- the damage is per-block
+  information loss, not a correctable level shift.
+- **Trusting the simulation.** The local ffmpeg channel model in
+  `bench/channel.py` did correctly predict that v4 would fail, but for the
+  wrong reason: it mangles chroma, which the real service leaves untouched. It
+  is kept for fast iteration, but no format decision should rest on it.
 
 ## The side channels, in proportion
 
@@ -336,13 +380,19 @@ README.
 | | v2 | v3 | v4 | v5 |
 |---|---|---|---|---|
 | Colour space | Grayscale | YUV 4:2:0 | YUV 4:2:0 | YUV 4:2:0 |
-| Bits per block | 1 | 2 Y / 1 C | 3 Y / 2 C | 3 Y / 2 C |
-| Data per frame | 16,080 B | 40,140 B | 64,200 B | 64,200 B |
+| Bits per block | 1 | 2 Y / 1 C | 3 Y / 2 C | **2 Y / 3 C** |
+| Data per frame | 16,080 B | 40,140 B | 64,200 B | 56,100 B |
+| Survives real YouTube | untested | untested | **no** (3.6e-02 BER) | **yes** (1.1e-05) |
+| Format chosen by | — | — | local encoder only | **real round trips** |
 | Pixel engine | NumPy | C single-thread | C single-thread | C threaded, packed bits |
 | Upload quantiser | qp 18 | qp 18 | qp 18 | **qp 44** |
 | Decode passes | 2 | 2 | 2 | **1 (streamed)** |
 | Audio channel | — | header (never read) | header (never read) | **2,100 bps, read as fallback** |
 | Description channel | — | — | — | **header sidecar** |
+
+v5 carries 13% fewer bytes per frame than v4 and is the first version that
+actually round-trips through the service. `PROFILE_DENSE` carries 128,880 B per
+frame — 2.0x v4 — at roughly twice the uploaded size.
 
 ## License
 
