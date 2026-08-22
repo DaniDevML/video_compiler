@@ -175,6 +175,27 @@ is the only measurement that actually proves the format works.
 | decode + error correction | 37.4 s |
 | **result** | **bytes identical** |
 
+### Scaling
+
+| payload | video | upload | processing | download | decode | result |
+|---|---|---|---|---|---|---|
+| 8 MB | 25.3 MB | 17.7 s @ 12.0 Mbit/s | 24 s | 3.8 s @ 45 Mbit/s | 37.4 s | identical |
+| 64 MB | 202 MB | 108 s @ 15.7 Mbit/s | 50 s | 8.5 s @ 156 Mbit/s | 352.7 s | identical |
+| 256 MB | 808 MB | 369 s @ 18.4 Mbit/s | 91 s | 30.6 s @ 172 Mbit/s | 1252 s | identical |
+
+Everything scales linearly except the upload rate, which improves as the
+transfer gets long enough to reach full speed. Two observations:
+
+**Decode dominates at scale, and it is all error correction.** At roughly 5 s
+per payload MB, a 256 MB archive spends 21 minutes in Reed-Solomon. The fast
+path is a parity strip plus a CRC check; a single error anywhere forces a full
+correction pass over the whole archive, and off YouTube there are always a few.
+
+**YouTube returns less than it was given** — 626 MB back from an 808 MB upload.
+It re-encodes everything, which is exactly why the upload quantiser is nearly
+free to raise, and why a format has to be validated against the service rather
+than against our own encoder.
+
 Two things to note. YouTube returns a *smaller* file than was uploaded
 (20.47 MB against 25.28 MB) — it re-encodes everything, which is why the upload
 quantiser is nearly free to raise. And decode takes far longer here than in the

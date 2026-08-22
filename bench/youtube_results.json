@@ -66,5 +66,28 @@
     "decode_s": 352.7148140999998,
     "recovered": true,
     "status": "ok"
+  },
+  {
+    "size_mb": 256.0,
+    "started": "2026-08-22 18:57:17",
+    "payload_bytes": 268435456,
+    "sha256": "1fbf2c555ab642bc8645b4f2634754d56c49ea01ef26a479b82b0857e43d773b",
+    "encode_s": 31.03560430000107,
+    "video_bytes": 847140348,
+    "expansion": 3.1558437198400497,
+    "approx_frames": 4786,
+    "duration_s": 159.53333333333333,
+    "upload_s": 369.13769180000054,
+    "video_id": "WateWI6CzhA",
+    "url": "https://www.youtube.com/watch?v=WateWI6CzhA",
+    "upload_mbps": 18.359335647771935,
+    "processing_wait_s": 90.91416260000005,
+    "sidecar_present": true,
+    "download_s": 30.55972380000094,
+    "downloaded_bytes": 656245607,
+    "download_mbps": 171.79359638060075,
+    "decode_s": 1251.9711024999997,
+    "recovered": true,
+    "status": "ok"
   }
 ]
