@@ -80,6 +80,48 @@ def _load():
             ctypes.c_int,   # margin
         ]
 
+        # v5 packed-bit entry points. A library built from an older
+        # frame_ops.c will not export these; the packed fast path is then
+        # simply reported as unavailable and callers use the v4 path.
+        if hasattr(lib, 'encode_plane_packed'):
+            lib.encode_plane_packed.restype  = None
+            lib.encode_plane_packed.argtypes = [
+                _c_uint8_p,        # src (packed bytes)
+                ctypes.c_uint64,   # bit_offset
+                ctypes.c_uint64,   # bit_stride
+                _c_uint8_p,        # out
+                ctypes.c_int,      # n_frames
+                ctypes.c_int,      # plane_h
+                ctypes.c_int,      # plane_w
+                ctypes.c_int,      # block_size
+                ctypes.c_int,      # blocks_x
+                ctypes.c_int,      # blocks_y_data
+                ctypes.c_int,      # sync_rows
+                ctypes.c_int,      # bpp
+                ctypes.c_int,      # n_threads
+            ]
+            lib.decode_plane_packed.restype  = None
+            lib.decode_plane_packed.argtypes = [
+                _c_uint8_p,        # frames
+                _c_uint8_p,        # out (packed, must start zeroed)
+                ctypes.c_uint64,   # bit_offset
+                ctypes.c_uint64,   # bit_stride
+                ctypes.c_int,      # n_frames
+                ctypes.c_int,      # plane_h
+                ctypes.c_int,      # plane_w
+                ctypes.c_int,      # block_size
+                ctypes.c_int,      # blocks_x
+                ctypes.c_int,      # blocks_y_data
+                ctypes.c_int,      # sync_rows
+                ctypes.c_int,      # bpp
+                ctypes.c_int,      # margin
+                ctypes.c_int,      # n_threads
+            ]
+
+        if hasattr(lib, 'native_threads'):
+            lib.native_threads.restype  = ctypes.c_int
+            lib.native_threads.argtypes = []
+
         _lib = lib
     except Exception as e:
         print(f'[native] Warning: could not load {_LIB_NAME}: {e}')
@@ -87,6 +129,17 @@ def _load():
 
 _load()
 NATIVE_AVAILABLE = _lib is not None
+PACKED_AVAILABLE = NATIVE_AVAILABLE and hasattr(_lib, 'encode_plane_packed')
+
+# Threads the C library will use internally. >1 means it was built with
+# OpenMP, in which case callers must not add a second layer of parallelism.
+NATIVE_THREADS = (_lib.native_threads()
+                  if NATIVE_AVAILABLE and hasattr(_lib, 'native_threads')
+                  else 1)
+
+# get_bits/put_bits read and write three bytes at a time, so the packed
+# buffers handed to the C layer need slack past the last real bit.
+PACK_PAD = 4
 
 
 def _ptr(arr: np.ndarray):
@@ -144,6 +197,51 @@ def check_sync_c(frame: np.ndarray,
         _ptr(frame_c),
         plane_h, plane_w,
         block_size, blocks_x, sync_rows, margin,
+    )
+
+
+# ─── packed-bit fast path (v5) ────────────────────────────────────────────────
+
+def encode_plane_packed_c(src: np.ndarray,
+                          bit_offset: int, bit_stride: int,
+                          n_frames: int,
+                          plane_h: int, plane_w: int,
+                          block_size: int, blocks_x: int,
+                          blocks_y_data: int, sync_rows: int,
+                          bpp: int) -> np.ndarray:
+    """Encode straight from packed payload bytes.
+
+    `src` must be a contiguous uint8 array with at least PACK_PAD bytes of
+    readable slack past the last bit this call will touch.
+    Returns (n_frames, plane_h, plane_w) uint8.
+    """
+    out = np.empty(n_frames * plane_h * plane_w, dtype=np.uint8)
+    _lib.encode_plane_packed(
+        _ptr(src), ctypes.c_uint64(bit_offset), ctypes.c_uint64(bit_stride),
+        _ptr(out), n_frames, plane_h, plane_w,
+        block_size, blocks_x, blocks_y_data, sync_rows, bpp, NATIVE_THREADS,
+    )
+    return out.reshape(n_frames, plane_h, plane_w)
+
+
+def decode_plane_packed_c(frames: np.ndarray, out: np.ndarray,
+                          bit_offset: int, bit_stride: int,
+                          plane_h: int, plane_w: int,
+                          block_size: int, blocks_x: int,
+                          blocks_y_data: int, sync_rows: int,
+                          bpp: int, margin: int) -> None:
+    """Decode packed bits directly into `out`, which must start zeroed.
+
+    Bits are OR-ed in, so `out` accumulates across the per-plane calls that
+    make up one frame.
+    """
+    frames_c = np.ascontiguousarray(frames, dtype=np.uint8)
+    _lib.decode_plane_packed(
+        _ptr(frames_c), _ptr(out),
+        ctypes.c_uint64(bit_offset), ctypes.c_uint64(bit_stride),
+        len(frames_c), plane_h, plane_w,
+        block_size, blocks_x, blocks_y_data, sync_rows, bpp, margin,
+        NATIVE_THREADS,
     )
 
 

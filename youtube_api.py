@@ -42,9 +42,23 @@ def get_youtube_service():
     return build('youtube', 'v3', credentials=creds)
 
 
+def _read_sidecar(video_path: str) -> str:
+    """The header line the encoder wrote next to the video, if present."""
+    path = video_path + '.sidecar'
+    try:
+        with open(path, encoding='utf-8') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
 def upload_video(video_path: str, title: str = 'Data Archive', progress=None) -> tuple:
     """
     Upload a video to YouTube as an unlisted video.
+
+    The header is also written into the description. YouTube stores the
+    description verbatim, so it gives the decoder a lossless copy of the
+    parameters it would otherwise have to recover from the pixels.
 
     Returns:
         (video_id, url)
@@ -56,13 +70,17 @@ def upload_video(video_path: str, title: str = 'Data Archive', progress=None) ->
     log('Authenticating with YouTube API...')
     youtube = get_youtube_service()
 
+    description = ('Encoded data archive. '
+                   'Created with vid_compiler for research purposes.')
+    sidecar = _read_sidecar(video_path)
+    if sidecar:
+        description += '\n\n' + sidecar
+        log('Header copy embedded in the video description.')
+
     body = {
         'snippet': {
             'title': title,
-            'description': (
-                'Encoded data archive. '
-                'Created with vid_compiler for research purposes.'
-            ),
+            'description': description,
             'categoryId': '22',
         },
         'status': {
@@ -136,6 +154,28 @@ def _yt_dlp_executable() -> str:
         'The video downloader (yt-dlp) is not installed. '
         'Open a terminal and run:  pip install yt-dlp  — then restart the app.'
     )
+
+
+def fetch_description(url: str) -> str:
+    """Fetch a video's description text.
+
+    Best-effort: the description is only an accelerator for decoding, so any
+    failure here is not worth surfacing -- the decoder falls back to reading
+    the header out of the frames.
+    """
+    kwargs = {}
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    try:
+        video_id = extract_video_id(url)
+        proc = subprocess.run(
+            [_yt_dlp_executable(), '--skip-download', '--no-playlist',
+             '--print', 'description',
+             f'https://www.youtube.com/watch?v={video_id}'],
+            capture_output=True, text=True, timeout=60, **kwargs)
+        return proc.stdout if proc.returncode == 0 else ''
+    except Exception:
+        return ''
 
 
 def download_video(url: str, output_path: str, progress=None) -> str:

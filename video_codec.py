@@ -90,7 +90,9 @@ def _build(bs: int, pw: int, ph: int, bpp: int) -> dict:
     by    = ph // bs
     dr    = by - SYNC_ROWS
     bpf   = bx * dr * bpp        # bits per frame for this plane
-    m     = max(1, bs // 4) if bs >= 8 else 1
+    # Sampling inset. Blocks smaller than 4px have no room to inset without
+    # leaving zero pixels to average, so they are sampled whole.
+    m     = 0 if bs < 4 else max(1, bs // 4)
     sh    = SYNC_ROWS * bs       # pixel height of sync area
     dh    = dr * bs              # pixel height of data area
 
@@ -161,6 +163,51 @@ def unpack_header(raw: bytes) -> dict:
                     encoded_size=enc, crc32=crc, nroots=nr, block_size=bs,
                     fps=fps, bpp_y=bpy, bpp_c=bpc, planes=planes, audio_bytes=abytes)
     raise ValueError(f'Unknown header magic: {magic!r}')
+
+# ---------------------------------------------------------------------------
+# Sidecar header (carried in the video description)
+# ---------------------------------------------------------------------------
+#
+# The description survives YouTube untouched -- it is text metadata, not pixels
+# -- so it is the one perfectly lossless channel available. Putting a copy of
+# the header there means the decoder can learn the archive size, frame count
+# and CRC without decoding and scanning frames for the header frame at all.
+#
+# As *capacity* the description is irrelevant: YouTube allows 5000 characters,
+# about 3.7 KB of base64, against 1.9 MB/s carried by the pixels. Its value is
+# robustness and skipping the header-frame scan, not payload.
+
+SIDECAR_PREFIX = 'vidcompiler-header:'
+
+
+def encode_sidecar(header_raw: bytes) -> str:
+    """Render a header as a single text line for the video description."""
+    import base64
+    return SIDECAR_PREFIX + base64.b64encode(header_raw).decode('ascii')
+
+
+def decode_sidecar(text: str) -> dict | None:
+    """Recover a header from description text, or None if it isn't there.
+
+    Never raises: the description is attacker-editable free text and a decode
+    failure just means falling back to scanning the frames.
+    """
+    import base64
+    if not text:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith(SIDECAR_PREFIX):
+            continue
+        try:
+            raw = base64.b64decode(line[len(SIDECAR_PREFIX):], validate=True)
+            if raw[:8] not in (MAGIC, MAGIC_V3, MAGIC_V2):
+                continue
+            return unpack_header(raw)
+        except Exception:
+            continue
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Bit ↔ byte helpers
@@ -279,11 +326,16 @@ def _check_sync_np(frames: np.ndarray, p: dict,
 # ---------------------------------------------------------------------------
 
 try:
-    from native import (NATIVE_AVAILABLE,
+    from native import (NATIVE_AVAILABLE, PACKED_AVAILABLE, NATIVE_THREADS,
+                        PACK_PAD,
                         encode_plane_c, decode_plane_c,
+                        encode_plane_packed_c, decode_plane_packed_c,
                         check_sync_c, check_sync_batch_c)
 except ImportError:
     NATIVE_AVAILABLE = False
+    PACKED_AVAILABLE = False
+    NATIVE_THREADS = 1
+    PACK_PAD = 4
 
 
 def _encode_plane(bits_flat: np.ndarray, p: dict) -> np.ndarray:
@@ -375,6 +427,95 @@ def yuv_frames_to_bits(yuv_frames: np.ndarray,
     cr_bits = _decode_plane(Cr_frames, pc)   # (N, bpf_c)
 
     return np.concatenate([y_bits, cb_bits, cr_bits], axis=1)  # (N, BITS_PER_FRAME)
+
+
+# ---------------------------------------------------------------------------
+# Packed-byte fast path
+# ---------------------------------------------------------------------------
+#
+# The bit-per-byte representation costs an 8x intermediate array (75 MB for an
+# 8 MB payload) on both sides of the pipeline. These entry points hand packed
+# bytes straight to the C layer instead.
+#
+# Both rely on every plane's bit range being byte-aligned within a frame, which
+# holds for the v4/v5 geometry and is asserted below. That alignment is also
+# what makes the C layer's per-frame parallelism safe: no two frames, and no
+# two planes, ever touch the same output byte.
+
+_PLANE_BIT_OFFSETS = (0, BITS_PER_FRAME_Y, BITS_PER_FRAME_Y + BITS_PER_FRAME_C)
+
+assert BITS_PER_FRAME % 8 == 0, 'frame bit stride must be byte-aligned'
+assert all(o % 8 == 0 for o in _PLANE_BIT_OFFSETS), \
+    'each plane must start on a byte boundary'
+
+
+def pad_for_packed(data: bytes | np.ndarray) -> np.ndarray:
+    """Copy `data` into a uint8 array with the slack the C bit reader needs."""
+    arr = np.frombuffer(data, dtype=np.uint8) if isinstance(data, (bytes, bytearray)) \
+        else np.asarray(data, dtype=np.uint8)
+    out = np.zeros(len(arr) + PACK_PAD, dtype=np.uint8)
+    out[:len(arr)] = arr
+    return out
+
+
+def packed_to_yuv_frames(src: np.ndarray, n_frames: int,
+                         first_frame: int = 0,
+                         block_size: int = BLOCK_SIZE) -> np.ndarray:
+    """Encode packed payload bytes directly into (n, YUV_FRAME_BYTES) frames.
+
+    `src` must come from pad_for_packed(). `first_frame` selects where in the
+    stream this batch starts, so batches can be produced without re-slicing.
+    """
+    if not PACKED_AVAILABLE:
+        start = first_frame * BITS_PER_FRAME
+        bits = np.unpackbits(src[:-PACK_PAD] if PACK_PAD else src)
+        seg = bits[start:start + n_frames * BITS_PER_FRAME]
+        if len(seg) < n_frames * BITS_PER_FRAME:
+            seg = np.concatenate(
+                [seg, np.zeros(n_frames * BITS_PER_FRAME - len(seg), np.uint8)])
+        return bits_to_yuv_frames(seg, block_size=block_size)
+
+    py = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, BPP_Y)
+    pc = _params(block_size, CHROMA_W,    CHROMA_H,     BPP_C)
+    base = first_frame * BITS_PER_FRAME
+
+    planes = []
+    for p, off in zip((py, pc, pc), _PLANE_BIT_OFFSETS):
+        planes.append(encode_plane_packed_c(
+            src, base + off, BITS_PER_FRAME, n_frames,
+            p['ph'], p['pw'], p['bs'], p['bx'], p['dr'], SYNC_ROWS, p['bpp']))
+
+    out = np.empty((n_frames, YUV_FRAME_BYTES), dtype=np.uint8)
+    out[:, :Y_PLANE_BYTES] = planes[0].reshape(n_frames, -1)
+    out[:, Y_PLANE_BYTES:Y_PLANE_BYTES + CB_PLANE_BYTES] = planes[1].reshape(n_frames, -1)
+    out[:, Y_PLANE_BYTES + CB_PLANE_BYTES:] = planes[2].reshape(n_frames, -1)
+    return out
+
+
+def yuv_frames_to_packed(yuv_frames: np.ndarray,
+                         block_size: int = BLOCK_SIZE) -> np.ndarray:
+    """Decode frames straight to packed bytes, (n * BYTES_PER_FRAME,) uint8."""
+    n = len(yuv_frames)
+    if not PACKED_AVAILABLE:
+        bits = yuv_frames_to_bits(yuv_frames, block_size=block_size)
+        return np.packbits(bits.reshape(-1))
+
+    py = _params(block_size, FRAME_WIDTH, FRAME_HEIGHT, BPP_Y)
+    pc = _params(block_size, CHROMA_W,    CHROMA_H,     BPP_C)
+
+    Y  = yuv_frames[:, :Y_PLANE_BYTES].reshape(n, FRAME_HEIGHT, FRAME_WIDTH)
+    Cb = yuv_frames[:, Y_PLANE_BYTES:Y_PLANE_BYTES + CB_PLANE_BYTES] \
+        .reshape(n, CHROMA_H, CHROMA_W)
+    Cr = yuv_frames[:, Y_PLANE_BYTES + CB_PLANE_BYTES:] \
+        .reshape(n, CHROMA_H, CHROMA_W)
+
+    out = np.zeros(n * BYTES_PER_FRAME + PACK_PAD, dtype=np.uint8)
+    for frames, p, off in zip((Y, Cb, Cr), (py, pc, pc), _PLANE_BIT_OFFSETS):
+        decode_plane_packed_c(
+            frames, out, off, BITS_PER_FRAME,
+            p['ph'], p['pw'], p['bs'], p['bx'], p['dr'], SYNC_ROWS,
+            p['bpp'], p['m'])
+    return out[:n * BYTES_PER_FRAME]
 
 
 # ---------------------------------------------------------------------------

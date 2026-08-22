@@ -46,3 +46,9 @@ build/
 
 # ── Claude Code internal ─────────────────────────────────────────
 .claude/
+
+# ── Encoder sidecar (header copy for the video description) ──────
+*.sidecar
+
+# ── Benchmark scratch output ──────────────────────────────────────
+bench/*.out

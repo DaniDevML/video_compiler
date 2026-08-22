@@ -41,10 +41,10 @@ import numpy as np
 
 # ─── Audio parameters ────────────────────────────────────────────────────────
 SAMPLE_RATE       = 44_100   # Hz
-FREQ_0            = 1_500    # Hz  (represents bit 0)
-FREQ_1            = 3_000    # Hz  (represents bit 1)
-BITS_PER_SEC      = 100      # symbol rate
-SAMPLES_PER_BIT   = SAMPLE_RATE // BITS_PER_SEC   # 441 samples / bit
+FREQ_0            = 3_000    # Hz  (represents bit 0)
+FREQ_1            = 6_000    # Hz  (represents bit 1)
+BITS_PER_SEC      = 2_100    # symbol rate  (divides SAMPLE_RATE exactly)
+SAMPLES_PER_BIT   = SAMPLE_RATE // BITS_PER_SEC   # 21 samples / bit
 AMPLITUDE         = 0.25     # fraction of full scale (keeps headroom for AAC)
 
 # RS params (same as video codec to reuse the pre-warmed galois RS object)
@@ -154,8 +154,13 @@ def encode_audio(payload: bytes, total_samples: int) -> np.ndarray:
     to ffmpeg as s16le after scaling (or directly as f32le).
     """
     rs_payload = _rs_encode_audio(payload)
+    # Both lengths are needed: the RS length says how many bytes to read off
+    # the wire, the payload length says where the zero padding that was added
+    # to fill the last RS chunk begins. Recording only the former made exact
+    # recovery impossible, since the decoder could not tell payload from pad.
+    prefix     = struct.pack('<II', len(payload), len(rs_payload))
     data_bits  = np.unpackbits(
-        np.frombuffer(struct.pack('<I', len(rs_payload)) + rs_payload, dtype=np.uint8)
+        np.frombuffer(prefix + rs_payload, dtype=np.uint8)
     )
     sync_bits  = np.unpackbits(np.frombuffer(SYNC_WORD, dtype=np.uint8))
 
@@ -180,7 +185,7 @@ def max_payload_bytes(total_samples: int) -> int:
         int(PREAMBLE_SECS * SAMPLE_RATE) +
         int(SILENCE_SECS  * SAMPLE_RATE) +
         len(SYNC_WORD) * 8 * SAMPLES_PER_BIT +
-        4 * 8 * SAMPLES_PER_BIT          # 4-byte length prefix
+        8 * 8 * SAMPLES_PER_BIT          # 8-byte length prefix
     )
     available_samples = total_samples - overhead_samples
     if available_samples <= 0:
@@ -237,12 +242,15 @@ def decode_audio(pcm_s16: bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
 
     data_start += sync_n * spb
 
-    # ── Read 4-byte RS-payload length ──────────────────────────────────────
-    len_bits   = _demod_bits(sig[data_start:], 32, spb)
-    rs_length  = struct.unpack('<I', np.packbits(len_bits).tobytes())[0]
-    data_start += 32 * spb
+    # ── Read the 8-byte length prefix (payload length, RS length) ──────────
+    len_bits   = _demod_bits(sig[data_start:], 64, spb)
+    payload_length, rs_length = struct.unpack(
+        '<II', np.packbits(len_bits).tobytes())
+    data_start += 64 * spb
 
     if rs_length == 0 or rs_length > len(sig) // spb // 8:
+        return b''
+    if payload_length > rs_length:
         return b''
 
     # ── Read RS-encoded payload ────────────────────────────────────────────
@@ -251,7 +259,7 @@ def decode_audio(pcm_s16: bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
     rs_bytes    = np.packbits(rs_bits_arr).tobytes()[:rs_length]
 
     try:
-        return _rs_decode_audio(rs_bytes)
+        return _rs_decode_audio(rs_bytes)[:payload_length]
     except Exception:
         return b''
 

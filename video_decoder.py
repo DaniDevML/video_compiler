@@ -10,7 +10,10 @@ import os
 import subprocess
 import sys
 import tarfile
+import tempfile
 import zlib
+
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 
 import numpy as np
 import imageio_ffmpeg
@@ -22,11 +25,12 @@ from video_codec import (
     NROOTS, CHUNK_IN, FPS,
     HEADER_SIZE, HEADER_REPEAT,
     MAGIC, MAGIC_V3, MAGIC_V2,
-    unpack_header, bits_to_bytes,
-    yuv_frames_to_bits, check_sync_yuv, yuv_frame_to_header,
+    unpack_header, bits_to_bytes, decode_sidecar,
+    yuv_frames_to_bits, yuv_frames_to_packed,
+    check_sync_yuv, yuv_frame_to_header,
     # v2 compat
     check_sync_batch, frames_to_bits_batch, decode_header_frame,
-    NATIVE_AVAILABLE,
+    NATIVE_AVAILABLE, PACKED_AVAILABLE, NATIVE_THREADS,
 )
 
 _CANDIDATE_BLOCK_SIZES = [4, 16]
@@ -46,6 +50,29 @@ def _rs_warmup():
 
 
 _t.Thread(target=_rs_warmup, daemon=True).start()
+
+
+_RS_WORKERS = min(12, (os.cpu_count() or 4))
+_RS_THREAD_MIN_CHUNKS = 64
+
+
+def _rs_decode_parallel(rs, arr: np.ndarray) -> bytes:
+    """Reed-Solomon decode split across threads.
+
+    Same rationale as the encoder: galois runs numba-compiled ufuncs that
+    release the GIL, so splitting the chunk matrix genuinely parallelises.
+    Correction is per-chunk, so splitting cannot change the result.
+    """
+    if len(arr) < _RS_THREAD_MIN_CHUNKS or _RS_WORKERS < 2:
+        return np.asarray(rs.decode(arr.view(_GF)), dtype=np.uint8).tobytes()
+
+    bounds = np.linspace(0, len(arr), _RS_WORKERS + 1).astype(int)
+    parts  = [arr[a:b] for a, b in zip(bounds[:-1], bounds[1:]) if b > a]
+    with _ThreadPoolExecutor(max_workers=len(parts)) as ex:
+        outs = list(ex.map(
+            lambda c: np.asarray(rs.decode(c.view(_GF)), dtype=np.uint8),
+            parts))
+    return np.concatenate(outs).tobytes()
 
 
 def _rs_strip_parity(data: bytes, nroots: int = NROOTS) -> bytes:
@@ -68,11 +95,10 @@ def rs_decode(data: bytes, original_size: int, nroots: int = NROOTS) -> bytes:
 
     if n_full > 0:
         arr = np.frombuffer(data[:n_full * chunk_size], dtype=np.uint8) \
-                .reshape(-1, chunk_size).astype(int)
+                .reshape(-1, chunk_size)
         try:
             rs = _galois.ReedSolomon(255, chunk_in) if nroots != NROOTS else _RS
-            dec = rs.decode(_GF(arr))
-            parts.append(np.asarray(dec, dtype=np.uint8).tobytes())
+            parts.append(_rs_decode_parallel(rs, arr))
         except Exception:
             raise RuntimeError(
                 "Couldn't repair the data errors in this video. "
@@ -105,34 +131,49 @@ def _popen_kw(**extra):
     return kw
 
 
-def _build_decode_cmd(video_path: str, pix_fmt: str, output: str = 'pipe:1') -> list:
-    """Build ffmpeg decode command for either yuv420p (v3) or gray (v2)."""
-    exe   = imageio_ffmpeg.get_ffmpeg_exe()
-    w, h  = FRAME_WIDTH, FRAME_HEIGHT
-    scale = f'scale={w}:{h}:flags=neighbor'
-    tail  = ['-vf', scale, '-f', 'rawvideo', '-pix_fmt', pix_fmt]
+_SIZE_CACHE: dict = {}
+
+
+def _needs_scale(video_path: str) -> bool:
+    """Whether this video has to be rescaled to the codec's frame geometry.
+
+    Almost never true: YouTube returns 1080p and the encoder wrote 1080p. When
+    it is false the scale filter is a full-frame no-op worth skipping.
+    """
+    if video_path not in _SIZE_CACHE:
+        _SIZE_CACHE[video_path] = probe_video(video_path)
+    w, h = _SIZE_CACHE[video_path]
+    return not (w == FRAME_WIDTH and h == FRAME_HEIGHT)
+
+
+def _build_decode_cmd(video_path: str, pix_fmt: str, output: str = 'pipe:1',
+                      max_frames: int | None = None) -> list:
+    """Build ffmpeg decode command for either yuv420p (v4/v3) or gray (v2).
+
+    `max_frames` limits how much of the video is decoded, which is what makes
+    format detection cheap: it only needs the opening frames, not the whole
+    file.
+
+    Decoding runs on the CPU. CUDA hwaccel was measured to be slower here, not
+    faster: the frames have to come back over PCIe to reach system memory, and
+    that transfer costs more than the decode it saves (measured 142 fps with
+    hwaccel against 250 fps on the CPU, and 12 fps for hwaccel without a filter
+    to force the download path). See bench/bench_decode_cmd.py.
+    """
+    exe  = imageio_ffmpeg.get_ffmpeg_exe()
+    tail = []
+    if max_frames:
+        tail += ['-frames:v', str(max_frames)]
+    if _needs_scale(video_path):
+        tail += ['-vf', f'scale={FRAME_WIDTH}:{FRAME_HEIGHT}:flags=neighbor']
+    tail += ['-f', 'rawvideo', '-pix_fmt', pix_fmt]
     tail += ['pipe:1'] if output == 'pipe:1' else ['-y', output]
-
-    if sys.platform == 'win32':
-        probe_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW)
-        try:
-            r = subprocess.run(
-                [exe, '-hwaccel', 'cuda', '-i', video_path,
-                 '-frames:v', '1', '-f', 'null', '-'],
-                timeout=8, **probe_kw)
-            if r.returncode == 0:
-                return [exe, '-hwaccel', 'cuda', '-i', video_path] + tail
-        except Exception:
-            pass
-
     return [exe, '-threads', '0', '-i', video_path] + tail
 
 
-_FILE_IO_LIMIT_BYTES = 5 * 1024 ** 3   # 5 GB
-
-
 def probe_video(video_path: str) -> tuple:
+    if video_path in _SIZE_CACHE:
+        return _SIZE_CACHE[video_path]
     import re
     exe = imageio_ffmpeg.get_ffmpeg_exe()
     kw  = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -140,77 +181,90 @@ def probe_video(video_path: str) -> tuple:
         kw['creationflags'] = subprocess.CREATE_NO_WINDOW
     _, stderr = subprocess.Popen([exe, '-i', video_path], **kw).communicate()
     m = re.search(r'Video:.*?(\d{3,5})x(\d{3,5})', stderr.decode(errors='replace'))
-    return (int(m.group(1)), int(m.group(2))) if m else (None, None)
+    size = (int(m.group(1)), int(m.group(2))) if m else (None, None)
+    _SIZE_CACHE[video_path] = size
+    return size
 
 # ---------------------------------------------------------------------------
 # Raw-frame iterators
 # ---------------------------------------------------------------------------
 
-DECODE_BATCH = 32
+# Small batches decode markedly faster than large ones. A batch is read in
+# full before any pixel work starts, so the batch size sets how long ffmpeg
+# sits blocked on a full pipe while we demodulate. Measured on 1080p: 158 fps
+# at 4 frames per batch against 62 at 32 and 34 at 64. See
+# bench/diag_decode_pipe.py.
+DECODE_BATCH = 4
 
 
 def _iter_batches_pipe(proc, frame_bytes: int, batch_size: int):
-    buf        = bytearray()
-    frame_idx  = 0
+    """Yield (first_frame_index, (n, frame_bytes) uint8) batches from ffmpeg.
+
+    Reads straight into a NumPy buffer with readinto, so a batch makes no
+    intermediate copies on its way from the pipe to the pixel decoder.
+
+    The buffer is allocated once and reused. Allocating a fresh multi-hundred-
+    megabyte array per batch cost more than the decode itself: at batch=64 the
+    pipeline ran at 34 fps against 131 fps at batch=8, purely from allocation
+    and page-fault overhead.
+
+    Consequently the yielded array is only valid until the next iteration.
+    Every caller here consumes it immediately (demodulating it into packed
+    bytes, or reading a header out of it) before advancing.
+    """
+    frame_idx   = 0
     batch_bytes = frame_bytes * batch_size
+    arr = np.empty(batch_bytes, dtype=np.uint8)
+    mv  = memoryview(arr.data).cast('B')
 
     while True:
-        need  = batch_bytes - len(buf)
-        chunk = proc.stdout.read(need)
-        if chunk:
-            buf += chunk
-        if len(buf) < frame_bytes:
-            break
-        n      = len(buf) // frame_bytes
-        usable = n * frame_bytes
-        arr    = np.frombuffer(bytes(buf[:usable]), dtype=np.uint8).copy()
-        yield frame_idx, arr.reshape(n, frame_bytes)
-        buf        = bytearray(buf[usable:])
-        frame_idx += n
-        if not chunk:
+        filled = 0
+        while filled < batch_bytes:
+            n = proc.stdout.readinto(mv[filled:])
+            if not n:
+                break
+            filled += n
+
+        n_frames = filled // frame_bytes
+        if n_frames:
+            yield frame_idx, arr[:n_frames * frame_bytes].reshape(n_frames, -1)
+            frame_idx += n_frames
+        if filled < batch_bytes:
             break
 
+    try:
+        proc.stdout.close()
+    except Exception:
+        pass
     proc.wait()
 
 
-def _read_all_frames_file(video_path: str, pix_fmt: str, frame_bytes: int):
-    """
-    Faster than piping for most videos: ffmpeg writes to a temp .raw file,
-    Python memory-maps it to avoid loading everything into RAM at once.
-    """
-    import tempfile
-    tmp = tempfile.mktemp(suffix='.raw')
-    kw  = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if sys.platform == 'win32':
-        kw['creationflags'] = subprocess.CREATE_NO_WINDOW
-    subprocess.run(_build_decode_cmd(video_path, pix_fmt, output=tmp), **kw)
+def _open_stream(video_path: str, pix_fmt: str, max_frames: int | None = None):
+    return subprocess.Popen(
+        _build_decode_cmd(video_path, pix_fmt, max_frames=max_frames),
+        **_popen_kw(bufsize=1 << 22))
 
-    if not os.path.exists(tmp):
-        return None, None
-
-    file_size = os.path.getsize(tmp)
-    n_frames  = file_size // frame_bytes
-    if n_frames == 0:
-        os.unlink(tmp)
-        return None, None
-
-    usable = n_frames * frame_bytes
-    # Read into memory (memmap on Windows holds a file lock preventing deletion)
-    raw    = np.fromfile(tmp, dtype=np.uint8, count=usable)
-    os.unlink(tmp)
-    return raw.reshape(n_frames, frame_bytes), None
 
 # ---------------------------------------------------------------------------
 # Main decode entry point
 # ---------------------------------------------------------------------------
 
-def decode_video_to_files(video_path: str, output_dir: str, progress=None) -> list:
+def decode_video_to_files(video_path: str, output_dir: str, progress=None,
+                          description: str = '') -> list:
+    """Decode a VidCompiler video back into files.
+
+    `description` is the video's YouTube description. If it carries the header
+    sidecar the format-detection pass is skipped entirely, since detection
+    exists only to recover the parameters the sidecar already states.
+    """
     def log(msg):
         if progress:
             progress(msg)
 
     if NATIVE_AVAILABLE:
-        log('Pixel engine: C native library')
+        mode = 'packed' if PACKED_AVAILABLE else 'byte-per-bit'
+        log(f'Pixel engine: C native library ({mode}, {NATIVE_THREADS} thread'
+            f'{"s" if NATIVE_THREADS != 1 else ""})')
     else:
         log('Pixel engine: NumPy fallback')
 
@@ -223,9 +277,24 @@ def decode_video_to_files(video_path: str, output_dir: str, progress=None) -> li
             'version after upload. Please wait a moment and try again.'
         )
 
-    # ── Probe: detect v2 (gray) vs v3 (yuv420p) by scanning the first few frames ──
-    log('Detecting video format...')
-    version, header, block_size = _detect_version(video_path, log)
+    header = decode_sidecar(description)
+    if header is not None:
+        version = 2 if header['magic'] == MAGIC_V2 else 3
+        block_size = header['block_size']
+        log('Header recovered from the video description.')
+    else:
+        # ── Detect v2 (gray) vs v4/v3 (yuv420p) from the opening frames ──
+        log('Detecting video format...')
+        try:
+            version, header, block_size = _detect_version(video_path, log)
+        except RuntimeError:
+            # Last resort: the header backup carried in the audio track.
+            header = header_from_audio(video_path)
+            if header is None:
+                raise
+            log('Header recovered from the audio channel.')
+            version = 2 if header['magic'] == MAGIC_V2 else 3
+            block_size = header['block_size']
     fmt_label = {3: f'v{header["magic"][-1:].decode()} YUV {header["bpp_y"]}-bpp Y + {header["bpp_c"]}-bpp C',
                  2: 'v2 grayscale 1-bpp'}
     log(f'Format: {fmt_label[version]}  (block_size={block_size})')
@@ -240,53 +309,75 @@ def decode_video_to_files(video_path: str, output_dir: str, progress=None) -> li
 # Version detection
 # ---------------------------------------------------------------------------
 
+# The header is written as the very first frame, so detection only needs a
+# short prefix. A few spare frames cover a leading frame being dropped.
+_DETECT_FRAMES = 16
+
+
+def header_from_audio(media_path: str) -> dict | None:
+    """Recover the header from the FSK audio track, if the file has one.
+
+    The encoder has always written this backup copy, but nothing read it.
+    It is the last fallback: used only when the description sidecar is absent
+    and no header frame could be found in the pixels.
+    """
+    import audio_codec as _ac
+
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    tmp = tempfile.mktemp(suffix='.raw')
+    try:
+        kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if sys.platform == 'win32':
+            kw['creationflags'] = subprocess.CREATE_NO_WINDOW
+        r = subprocess.run(
+            [exe, '-i', media_path, '-vn', '-f', 's16le',
+             '-ar', str(_ac.SAMPLE_RATE), '-ac', '1', '-y', tmp], **kw)
+        if r.returncode != 0 or not os.path.exists(tmp) \
+                or os.path.getsize(tmp) == 0:
+            return None
+        with open(tmp, 'rb') as f:
+            pcm = f.read()
+        raw = _ac.decode_audio(pcm)
+        if not raw or raw[:8] not in (MAGIC, MAGIC_V3, MAGIC_V2):
+            return None
+        return unpack_header(raw)
+    except Exception:
+        return None
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def _detect_version(video_path: str, log):
     """
     Read just enough frames to find and parse the header.
     Returns (version: int, header: dict, block_size: int).
+
+    Only the opening frames are decoded. Earlier versions decoded the entire
+    video here and then decoded it a second time to read the payload, which
+    made detection as expensive as the decode itself.
     """
-    # Try yuv420p first (v3), fall back to gray (v2)
+    # Try yuv420p first (v3/v4), fall back to gray (v2)
     for pix_fmt, frame_bytes, v_candidate in [
         ('yuv420p', YUV_FRAME_BYTES, 3),
         ('gray',    FRAME_WIDTH * FRAME_HEIGHT, 2),
     ]:
-        tmp_path = None
-        raw_size_est = os.path.getsize(video_path) * 20
-        if raw_size_est < _FILE_IO_LIMIT_BYTES:
-            all_frames, tmp_path = _read_all_frames_file(video_path, pix_fmt, frame_bytes)
-            if all_frames is None:
-                continue
-            source = [(i, all_frames[i:i+DECODE_BATCH])
-                      for i in range(0, len(all_frames), DECODE_BATCH)]
-        else:
-            proc   = subprocess.Popen(_build_decode_cmd(video_path, pix_fmt),
-                                      **_popen_kw())
-            source = _iter_batches_pipe(proc, frame_bytes, DECODE_BATCH)
-
-        for batch_start, batch in source:
-            if batch_start > 60:
-                break   # header should be in first 60 frames
-
-            if v_candidate == 3:
-                header, bs = _try_find_header_v3(batch)
-            else:
-                # Gray frames are (N, W*H) — reshape to (N, H, W) for v2 API
-                batch_3d = batch.reshape(-1, FRAME_HEIGHT, FRAME_WIDTH)
-                header, bs = _try_find_header_v2(batch_3d)
-
-            if header is not None:
-                if tmp_path and os.path.exists(tmp_path):
-                    # Clean up the memmap temp file (detection only)
-                    del all_frames
-                    os.unlink(tmp_path)
-                return v_candidate, header, bs
-
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                del all_frames
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+        proc = _open_stream(video_path, pix_fmt, max_frames=_DETECT_FRAMES)
+        try:
+            for batch_start, batch in _iter_batches_pipe(
+                    proc, frame_bytes, DECODE_BATCH):
+                if v_candidate == 3:
+                    header, bs = _try_find_header_v3(batch)
+                else:
+                    # Gray frames are (N, W*H) — reshape to (N, H, W) for v2
+                    header, bs = _try_find_header_v2(
+                        batch.reshape(-1, FRAME_HEIGHT, FRAME_WIDTH))
+                if header is not None:
+                    return v_candidate, header, bs
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
 
     raise RuntimeError(
         "This doesn't appear to be a VidCompiler video — no data marker was found. "
@@ -335,23 +426,14 @@ def _decode_v3(video_path: str, header: dict, block_size: int,
     log(f'Header found. Archive: {header["archive_size"]:,} bytes, '
         f'{num_data_frames} data frames.')
 
-    tmp_path = None
-    raw_size_est = os.path.getsize(video_path) * 20
-    if raw_size_est < _FILE_IO_LIMIT_BYTES:
-        all_frames, tmp_path = _read_all_frames_file(video_path, 'yuv420p', frame_bytes)
-        if all_frames is None:
-            raise RuntimeError('Failed to decode video frames.')
-        source = [(i, all_frames[i:i+DECODE_BATCH])
-                  for i in range(0, len(all_frames), DECODE_BATCH)]
-        proc = None
-    else:
-        proc   = subprocess.Popen(_build_decode_cmd(video_path, 'yuv420p'),
-                                  **_popen_kw())
-        source = _iter_batches_pipe(proc, frame_bytes, DECODE_BATCH)
+    # Single streaming pass. Piping avoids staging ~20x the video size as raw
+    # YUV on disk, and lets pixel decoding overlap with ffmpeg.
+    proc   = _open_stream(video_path, 'yuv420p')
+    source = _iter_batches_pipe(proc, frame_bytes, DECODE_BATCH)
 
-    found_header     = False
-    bit_chunks: list = []
-    frames_read      = 0
+    found_header      = False
+    byte_chunks: list = []
+    frames_read       = 0
 
     for batch_start, batch in source:
         if not found_header:
@@ -363,29 +445,32 @@ def _decode_v3(video_path: str, header: dict, block_size: int,
                         found_header = True
                         tail = batch[i + 1:]
                         if len(tail):
-                            bit_chunks.append(yuv_frames_to_bits(tail, block_size))
+                            byte_chunks.append(
+                                yuv_frames_to_packed(tail, block_size))
                             frames_read += len(tail)
                         break
                 except Exception:
                     continue
             continue
 
-        bit_chunks.append(yuv_frames_to_bits(batch, block_size))
+        byte_chunks.append(yuv_frames_to_packed(batch, block_size))
         frames_read += len(batch)
 
         if frames_read % (DECODE_BATCH * 10) == 0:
             log(f'  frame {frames_read}/{num_data_frames}...')
 
         if frames_read >= num_data_frames:
-            if proc is not None:
-                proc.stdout.close()
             break
 
-    if tmp_path and os.path.exists(tmp_path):
-        del all_frames
-        os.unlink(tmp_path)
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
 
-    return _finish_decode(header, bit_chunks, frames_read, BITS_PER_FRAME, output_dir, log)
+    _require_all_frames(frames_read, num_data_frames)
+    log('Reconstructing bytes...')
+    encoded_bytes = (np.concatenate(byte_chunks).tobytes()[:header['encoded_size']]
+                     if byte_chunks else b'')
+    return _finish_decode(header, encoded_bytes, output_dir, log)
 
 
 # ---------------------------------------------------------------------------
@@ -402,19 +487,9 @@ def _decode_v2(video_path: str, header: dict, block_size: int,
     log(f'Header found (v2). Archive: {header["archive_size"]:,} bytes, '
         f'{num_data_frames} data frames.')
 
-    tmp_path = None
-    raw_size_est = os.path.getsize(video_path) * 20
-    if raw_size_est < _FILE_IO_LIMIT_BYTES:
-        all_frames, tmp_path = _read_all_frames_file(video_path, 'gray', frame_bytes)
-        if all_frames is None:
-            raise RuntimeError('Failed to decode video frames.')
-        source = [(i, all_frames[i:i+DECODE_BATCH].reshape(-1, FRAME_HEIGHT, FRAME_WIDTH))
-                  for i in range(0, len(all_frames), DECODE_BATCH)]
-        proc = None
-    else:
-        proc   = subprocess.Popen(_build_decode_cmd(video_path, 'gray'), **_popen_kw())
-        source = [(bi, arr.reshape(-1, FRAME_HEIGHT, FRAME_WIDTH))
-                  for bi, arr in _iter_batches_pipe(proc, frame_bytes, DECODE_BATCH)]
+    proc   = _open_stream(video_path, 'gray')
+    source = ((bi, arr.reshape(-1, FRAME_HEIGHT, FRAME_WIDTH))
+              for bi, arr in _iter_batches_pipe(proc, frame_bytes, DECODE_BATCH))
 
     found_header     = False
     bit_chunks: list = []
@@ -441,26 +516,24 @@ def _decode_v2(video_path: str, header: dict, block_size: int,
         frames_read += len(batch)
 
         if frames_read >= num_data_frames:
-            if proc is not None:
-                proc.stdout.close()
             break
 
-    if tmp_path and os.path.exists(tmp_path):
-        del all_frames
-        os.unlink(tmp_path)
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
 
-    return _finish_decode(header, bit_chunks, frames_read, bpf, output_dir, log)
+    _require_all_frames(frames_read, num_data_frames)
+    log('Reconstructing bytes...')
+    all_bits      = np.concatenate(bit_chunks).ravel()[:num_data_frames * bpf]
+    encoded_bytes = bits_to_bytes(all_bits)[:header['encoded_size']]
+    return _finish_decode(header, encoded_bytes, output_dir, log)
 
 
 # ---------------------------------------------------------------------------
 # Common finish: RS decode → untar → output
 # ---------------------------------------------------------------------------
 
-def _finish_decode(header: dict, bit_chunks: list, frames_read: int,
-                   bpf: int, output_dir: str, log) -> list:
-    num_data_frames = header['num_data_frames']
-    nroots          = header['nroots']
-
+def _require_all_frames(frames_read: int, num_data_frames: int) -> None:
     if frames_read < num_data_frames:
         raise RuntimeError(
             f'The video ended earlier than expected '
@@ -468,9 +541,10 @@ def _finish_decode(header: dict, bit_chunks: list, frames_read: int,
             'It may have been clipped or only partially downloaded — please try again.'
         )
 
-    log('Reconstructing bytes...')
-    all_bits      = np.concatenate(bit_chunks).ravel()[:num_data_frames * bpf]
-    encoded_bytes = bits_to_bytes(all_bits)[:header['encoded_size']]
+
+def _finish_decode(header: dict, encoded_bytes: bytes,
+                   output_dir: str, log) -> list:
+    nroots = header['nroots']
 
     log('Verifying data integrity...')
     archive_bytes = _rs_strip_parity(encoded_bytes, nroots)[:header['archive_size']]

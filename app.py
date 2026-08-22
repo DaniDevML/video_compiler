@@ -86,15 +86,17 @@ def _decode_worker(job_id: str, youtube_url: str):
     progress = lambda m: _job_progress(job_id, m)
     tmp_video = None
     try:
-        from youtube_api import download_video
+        from youtube_api import download_video, fetch_description
         from video_decoder import decode_video_to_files
 
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tf:
             tmp_video = tf.name  # close handle before yt-dlp writes to it
+        description = fetch_description(youtube_url)
         tmp_video = download_video(youtube_url, tmp_video, progress=progress)
 
         out_dir = tempfile.mkdtemp()
-        names = decode_video_to_files(tmp_video, out_dir, progress=progress)
+        names = decode_video_to_files(tmp_video, out_dir, progress=progress,
+                                      description=description)
 
         # Zip everything up for browser download
         zip_path = out_dir + '_decoded.zip'

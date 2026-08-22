@@ -16,6 +16,8 @@ import threading
 import zlib
 from pathlib import Path
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import imageio_ffmpeg
 
@@ -24,9 +26,10 @@ from video_codec import (
     BITS_PER_FRAME, BYTES_PER_FRAME,
     NROOTS, CHUNK_IN, FPS,
     HEADER_SIZE, HEADER_REPEAT,
-    pack_header, bytes_to_bits,
+    pack_header, bytes_to_bits, encode_sidecar,
     bits_to_yuv_frames, header_to_yuv_frame,
-    NATIVE_AVAILABLE,
+    pad_for_packed, packed_to_yuv_frames,
+    NATIVE_AVAILABLE, PACKED_AVAILABLE, NATIVE_THREADS,
 )
 import audio_codec as _ac
 
@@ -47,43 +50,85 @@ def _rs_warmup():
 threading.Thread(target=_rs_warmup, daemon=True).start()
 
 
+_RS_WORKERS = min(12, (os.cpu_count() or 4))
+# Below this many chunks the thread hand-off costs more than it saves.
+_RS_THREAD_MIN_CHUNKS = 64
+
+
 def rs_encode(data: bytes) -> bytes:
+    """Reed-Solomon encode, parallelised across chunks.
+
+    Two changes from the v4 path, both verified to produce byte-identical
+    parity: the payload is handed to galois as uint8 rather than being widened
+    to int64 first, and the chunk matrix is split across threads. galois
+    dispatches to numba-compiled ufuncs that release the GIL, so the threads
+    genuinely run in parallel.
+    """
     pad    = (-len(data)) % CHUNK_IN
     padded = data + b'\x00' * pad
-    chunks = np.frombuffer(padded, dtype=np.uint8).reshape(-1, CHUNK_IN).astype(int)
-    enc    = _RS.encode(_GF(chunks))
-    return np.asarray(enc, dtype=np.uint8).tobytes()
+    chunks = np.frombuffer(padded, dtype=np.uint8).reshape(-1, CHUNK_IN)
+
+    if len(chunks) < _RS_THREAD_MIN_CHUNKS or _RS_WORKERS < 2:
+        return np.asarray(_RS.encode(chunks.view(_GF)), dtype=np.uint8).tobytes()
+
+    bounds = np.linspace(0, len(chunks), _RS_WORKERS + 1).astype(int)
+    parts  = [chunks[a:b] for a, b in zip(bounds[:-1], bounds[1:]) if b > a]
+    with ThreadPoolExecutor(max_workers=len(parts)) as ex:
+        outs = list(ex.map(
+            lambda c: np.asarray(_RS.encode(c.view(_GF)), dtype=np.uint8),
+            parts))
+    return np.concatenate(outs).tobytes()
 
 # ---------------------------------------------------------------------------
 # Hardware encoder detection
 # ---------------------------------------------------------------------------
+
+# Quantiser used for the upload. The blocks are flat by construction, so a
+# coarse quantiser reproduces them exactly -- measured clean (zero bit errors)
+# through our own decoder up to qp46, and the post-YouTube error rate is flat
+# across the whole qp18..qp46 range because YouTube discards our bitstream and
+# re-encodes regardless. Uploading at qp44 rather than the v4 default of qp18
+# therefore costs nothing and halves the bytes on the wire.
+# See bench/bench_upload_preset.py and bench/sweep_upload_qp.py.
+UPLOAD_QP = 44
+
 
 def _probe_hw_encoder() -> tuple:
     exe = imageio_ffmpeg.get_ffmpeg_exe()
     kw  = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
     if sys.platform == 'win32':
         kw['creationflags'] = subprocess.CREATE_NO_WINDOW
-    payload    = b'\x80' * (64 * 64 * 8)
+    payload = b'\x80' * (64 * 64 * 8)
+    q = str(UPLOAD_QP)
+    # The low-latency NVENC presets encode this content markedly faster than
+    # the default at identical output size; the newer p1..p7 preset names are
+    # not implemented on older (Pascal-era) drivers, so 'llhp' is used.
     candidates = [
-        ('h264_qsv',   ['-preset', 'veryfast', '-global_quality', '18', '-g', '1']),
-        ('h264_nvenc', ['-rc', 'constqp', '-qp', '18', '-g', '1', '-bf', '0']),
-        ('h264_amf',   ['-quality', 'speed', '-rc', 'cqp', '-qp_i', '18', '-g', '1']),
+        ('h264_nvenc', ['-preset', 'llhp', '-rc', 'constqp', '-qp', q,
+                        '-g', '1', '-bf', '0']),
+        ('h264_nvenc', ['-rc', 'constqp', '-qp', q, '-g', '1', '-bf', '0']),
+        ('h264_qsv',   ['-preset', 'veryfast', '-global_quality', q, '-g', '1']),
+        ('h264_amf',   ['-quality', 'speed', '-rc', 'cqp', '-qp_i', q, '-g', '1']),
     ]
     for codec, params in candidates:
         cmd = [exe, '-f', 'rawvideo', '-pix_fmt', 'gray', '-s', '64x64', '-r', '24',
                '-i', 'pipe:0', '-c:v', codec, *params, '-f', 'null', '-']
         try:
             p = subprocess.Popen(cmd, **kw)
-            p.stdin.write(payload)
-            p.stdin.close()
+            try:
+                p.stdin.write(payload)
+                p.stdin.close()
+            except (BrokenPipeError, OSError):
+                p.wait(timeout=10)
+                continue
             p.wait(timeout=10)
             if p.returncode == 0:
                 return codec, params
         except Exception:
             pass
     return ('libx264',
-            ['-crf', '20', '-preset', 'ultrafast', '-g', '1',
-             '-movflags', '+faststart', '-threads', '0'])
+            ['-qp', str(UPLOAD_QP), '-preset', 'ultrafast', '-g', '1',
+             '-aq-mode', '0', '-movflags', '+faststart', '-threads', '0'])
 
 
 _HW_CODEC: str | None = None
@@ -113,18 +158,27 @@ def create_archive(paths: list) -> bytes:
 # ---------------------------------------------------------------------------
 
 def _pipe_writer(pipe, q: queue.Queue):
+    """Drain the queue into ffmpeg's stdin.
+
+    Items are NumPy arrays rather than bytes: pipe.write takes any object
+    supporting the buffer protocol, so queueing the arrays directly avoids
+    copying every batch a second time on its way out.
+    """
     while True:
         item = q.get()
         if item is None:
             pipe.close()
             return
-        pipe.write(item)
+        pipe.write(memoryview(item).cast('B'))
 
 # ---------------------------------------------------------------------------
 # Main encode entry point
 # ---------------------------------------------------------------------------
 
-ENCODE_BATCH = 32
+# Frames generated per batch before handing off to the writer thread. Keeping
+# the batch small bounds how long ffmpeg waits on a block being generated and
+# how much sits queued (8 frames is ~25 MB). Measured best of 2/4/8/16/32/64.
+ENCODE_BATCH = 8
 
 
 def encode_files_to_video(file_paths: list, output_path: str, progress=None):
@@ -133,7 +187,9 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
             progress(msg)
 
     if NATIVE_AVAILABLE:
-        log('Pixel engine: C native library (maximum speed)')
+        mode = 'packed' if PACKED_AVAILABLE else 'byte-per-bit'
+        log(f'Pixel engine: C native library ({mode}, {NATIVE_THREADS} thread'
+            f'{"s" if NATIVE_THREADS != 1 else ""})')
     else:
         log('Pixel engine: NumPy fallback  —  run  python native/build.py  for faster encoding')
 
@@ -147,11 +203,11 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
     encoded_size = len(encoded)
     log(f'ECC encoded: {encoded_size:,} bytes  ({BYTES_PER_FRAME:,} bytes/frame).')
 
-    data_bits       = bytes_to_bits(encoded)
-    num_data_frames = math.ceil(len(data_bits) / BITS_PER_FRAME)
-    pad             = num_data_frames * BITS_PER_FRAME - len(data_bits)
-    if pad:
-        data_bits = np.concatenate([data_bits, np.zeros(pad, dtype=np.uint8)])
+    num_data_frames = math.ceil(len(encoded) / BYTES_PER_FRAME)
+    # One zero-padded buffer covering every frame, with the slack the packed
+    # bit reader needs past the end. Frames are cut from this without copying.
+    frame_src = pad_for_packed(
+        encoded.ljust(num_data_frames * BYTES_PER_FRAME, b'\x00'))
 
     total_frames        = 1 + num_data_frames
     total_audio_samples = int(total_frames / FPS * _ac.SAMPLE_RATE)
@@ -221,18 +277,14 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
 
     try:
         # Header frame
-        write_q.put(header_yuv.tobytes())
+        write_q.put(header_yuv)
 
-        # Data frames in batches
+        # Data frames in batches. The arrays are queued directly rather than
+        # via .tobytes(); pipe.write accepts the buffer protocol, so this
+        # avoids copying every batch (~100 MB each) a second time.
         for batch_start in range(0, num_data_frames, ENCODE_BATCH):
-            n   = min(ENCODE_BATCH, num_data_frames - batch_start)
-            s   = batch_start * BITS_PER_FRAME
-            seg = data_bits[s:s + n * BITS_PER_FRAME]
-            if len(seg) < n * BITS_PER_FRAME:
-                seg = np.concatenate([seg,
-                      np.zeros(n * BITS_PER_FRAME - len(seg), dtype=np.uint8)])
-            yuv_batch = bits_to_yuv_frames(seg)    # (n, YUV_FRAME_BYTES) uint8
-            write_q.put(yuv_batch.tobytes())
+            n = min(ENCODE_BATCH, num_data_frames - batch_start)
+            write_q.put(packed_to_yuv_frames(frame_src, n, batch_start))
 
             done = batch_start + n
             if done % (ENCODE_BATCH * 10) == 0:
@@ -247,6 +299,10 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
         os.unlink(audio_tmp)
 
     log('Video encoding complete!')
+    # Written alongside the video so the uploader can copy it into the
+    # description, giving the decoder a lossless copy of the header.
+    with open(output_path + '.sidecar', 'w', encoding='utf-8') as f:
+        f.write(encode_sidecar(header_raw))
     return output_path
 
 

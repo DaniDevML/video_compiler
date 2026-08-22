@@ -24,75 +24,90 @@ def _run(cmd, **kw):
     return r.returncode == 0, r.stderr.decode(errors='replace')
 
 
+def _loadable(path):
+    """A DLL that links against toolchain runtime DLLs compiles fine but fails
+    to load later, so verify it actually opens before declaring success."""
+    import ctypes
+    try:
+        ctypes.CDLL(path)
+        return True
+    except OSError:
+        return False
+
+
+def _find_cl():
+    """Locate cl.exe, preferring vswhere over guessing install locations."""
+    import glob
+
+    vswhere = os.path.join(
+        os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
+        r'Microsoft Visual Studio\Installer\vswhere.exe',
+    )
+    if os.path.exists(vswhere):
+        r = subprocess.run(
+            [vswhere, '-latest', '-products', '*', '-requires',
+             'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+             '-property', 'installationPath'],
+            capture_output=True, text=True,
+        )
+        root = r.stdout.strip().splitlines()
+        if root:
+            hits = sorted(glob.glob(os.path.join(
+                root[0], r'VC\Tools\MSVC\*\bin\Hostx64\x64\cl.exe')))
+            if hits:
+                return hits[-1]
+
+    for base in (r'C:\Program Files\Microsoft Visual Studio',
+                 r'C:\Program Files (x86)\Microsoft Visual Studio'):
+        hits = sorted(glob.glob(
+            base + r'\**\bin\Hostx64\x64\cl.exe', recursive=True))
+        if hits:
+            return hits[-1]
+    return None
+
+
 def build():
     if sys.platform == 'win32':
-        # ── Try MSVC (cl.exe) ──────────────────────────────────────────────
-        # Locate cl.exe via vswhere
-        vswhere = os.path.join(
-            os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
-            r'Microsoft Visual Studio\Installer\vswhere.exe',
-        )
-        cl_path = None
-        if os.path.exists(vswhere):
-            r = subprocess.run(
-                [vswhere, '-latest', '-requires',
-                 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-                 '-find', r'VC\Tools\MSVC\**\bin\Hostx64\x64\cl.exe'],
-                capture_output=True, text=True,
-            )
-            candidates = r.stdout.strip().splitlines()
-            if candidates:
-                cl_path = candidates[0]
-
-        # Fallback: direct glob search for cl.exe
-        if not (cl_path and os.path.exists(cl_path)):
-            import glob
-            hits = glob.glob(
-                r'C:\Program Files\Microsoft Visual Studio\**\bin\Hostx64\x64\cl.exe',
-                recursive=True,
-            ) + glob.glob(
-                r'C:\Program Files (x86)\Microsoft Visual Studio\**\bin\Hostx64\x64\cl.exe',
-                recursive=True,
-            )
-            if hits:
-                cl_path = hits[0]
-
+        cl_path = _find_cl()
         if cl_path and os.path.exists(cl_path):
-            # Locate accompanying lib directory and Python headers
-            import glob as _g
-            # cl_path: …/MSVC/<ver>/bin/Hostx64/x64/cl.exe -> need …/MSVC/<ver>
-            msvc_ver  = cl_path
+            # cl_path: …/VC/Tools/MSVC/<ver>/bin/Hostx64/x64/cl.exe
+            msvc_ver = cl_path
             for _ in range(4):
                 msvc_ver = os.path.dirname(msvc_ver)
-            msvc_lib  = os.path.join(msvc_ver, 'lib', 'x64')
-            py_inc    = _g.glob(
-                r'C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12*\include',
-            )
-            py_inc = py_inc[0] if py_inc else ''
-            # cl_path: …/VC/Tools/MSVC/<ver>/bin/Hostx64/x64/cl.exe
-            # We need: …/VC/Auxiliary/Build/vcvars64.bat  (7 dirname levels up)
-            vc_root = cl_path
-            for _ in range(7):
-                vc_root = os.path.dirname(vc_root)
-            vcvars = os.path.join(vc_root, r'Auxiliary\Build\vcvars64.bat')
+            msvc_lib = os.path.join(msvc_ver, 'lib', 'x64')
+            cl_dir   = os.path.dirname(cl_path)
 
-            obj    = os.path.join(_HERE, 'frame_ops.obj')
-            lib1   = os.path.join(msvc_lib, 'msvcrt.lib')
-            lib2   = os.path.join(msvc_lib, 'vcruntime.lib')
-            script = (
-                f'@echo off\r\n'
-                f'call "{vcvars}"\r\n'
-                f'cl /O2 /c /nologo'
-                + (f' /I"{py_inc}"' if py_inc else '') +
-                f' "{_SRC}" /Fo:"{obj}"\r\n'
-                f'if errorlevel 1 exit /b 1\r\n'
-                f'link /DLL /NOENTRY /nologo /OUT:"{_OUT}" "{obj}" "{lib1}" "{lib2}"\r\n'
-            )
-            bat = os.path.join(_HERE, '_build_tmp.bat')
-            with open(bat, 'w') as f:
-                f.write(script)
-            ok, err = _run([bat], cwd=_HERE, capture_output=True)
-            os.unlink(bat)
+            obj  = os.path.join(_HERE, 'frame_ops.obj')
+            lib1 = os.path.join(msvc_lib, 'msvcrt.lib')
+            lib2 = os.path.join(msvc_lib, 'vcruntime.lib')
+
+            # cl.exe is invoked directly rather than through vcvars64.bat:
+            # the batch file mangles install paths containing characters like
+            # '!', and frame_ops.c deliberately includes no system headers, so
+            # no INCLUDE/LIB search paths are needed -- the two CRT import
+            # libraries are passed by absolute path.
+            env = dict(os.environ)
+            env['PATH'] = cl_dir + os.pathsep + env.get('PATH', '')
+
+            if os.path.exists(_OUT):
+                try:
+                    os.unlink(_OUT)
+                except OSError:
+                    print(f'[native] {_OUT} is locked (in use by another '
+                          f'process?) — close it and retry.')
+                    return False
+
+            # /MD targets the DLL CRT so the object's default-library
+            # directive matches the msvcrt.lib/vcruntime.lib pair linked below.
+            # (/O2 can lower the hand-rolled fill loops to memset calls, so the
+            # CRT import libraries genuinely are needed.)
+            ok, err = _run([cl_path, '/O2', '/MD', '/c', '/nologo', _SRC,
+                            f'/Fo:{obj}'], cwd=_HERE, env=env)
+            if ok:
+                link = os.path.join(cl_dir, 'link.exe')
+                ok, err = _run([link, '/DLL', '/NOENTRY', '/nologo',
+                                f'/OUT:{_OUT}', obj, lib1, lib2],
+                               cwd=_HERE, env=env)
             for junk in [obj,
                          os.path.join(_HERE, 'frame_ops.exp'),
                          os.path.join(_HERE, 'frame_ops.lib')]:
@@ -106,26 +121,34 @@ def build():
         # ── Try GCC / MinGW ────────────────────────────────────────────────
         gcc = shutil.which('gcc')
         if gcc:
-            ok, err = _run([gcc, '-O3', '-march=native', '-shared',
-                            '-o', _OUT, _SRC])
-            if ok and os.path.exists(_OUT):
-                print(f'[native] Built with GCC -> {_OUT}')
-                return True
-            print(f'[native] GCC failed: {err[:300]}')
+            # -static -static-libgcc matters: without it a MinGW build links
+            # against libgomp-1.dll / libwinpthread-1.dll from the toolchain's
+            # bin directory, which is not on PATH for the Python process and
+            # makes the DLL fail to load on any machine without MinGW.
+            static = ['-static', '-static-libgcc']
+            for label, extra in [('GCC + OpenMP', ['-fopenmp', *static]),
+                                 ('GCC', static),
+                                 ('GCC (shared runtime)', [])]:
+                ok, err = _run([gcc, '-O3', '-march=native', '-shared', *extra,
+                                '-o', _OUT, _SRC])
+                if ok and os.path.exists(_OUT) and _loadable(_OUT):
+                    print(f'[native] Built with {label} -> {_OUT}')
+                    return True
+                print(f'[native] {label} failed: {err[:200] or "not loadable"}')
 
     else:  # Linux / macOS
-        for compiler, extra in [
-            ('gcc',   ['-O3', '-march=native', '-shared', '-fPIC']),
-            ('clang', ['-O3', '-march=native', '-shared', '-fPIC']),
-        ]:
+        base = ['-O3', '-march=native', '-shared', '-fPIC']
+        for compiler in ('gcc', 'clang'):
             exe = shutil.which(compiler)
             if not exe:
                 continue
-            ok, err = _run([exe, *extra, '-o', _OUT, _SRC])
-            if ok and os.path.exists(_OUT):
-                print(f'[native] Built with {compiler} -> {_OUT}')
-                return True
-            print(f'[native] {compiler} failed: {err[:300]}')
+            for label, extra in [(f'{compiler} + OpenMP', ['-fopenmp']),
+                                 (compiler, [])]:
+                ok, err = _run([exe, *base, *extra, '-o', _OUT, _SRC])
+                if ok and os.path.exists(_OUT):
+                    print(f'[native] Built with {label} -> {_OUT}')
+                    return True
+                print(f'[native] {label} failed: {err[:200]}')
 
     print('[native] No compiler found — app will use the NumPy fallback path.')
     print('         Install GCC (MinGW on Windows) or MSVC to enable the C fast path.')
