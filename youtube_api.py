@@ -133,27 +133,45 @@ def extract_video_id(url: str) -> str:
     )
 
 
-def _yt_dlp_executable() -> str:
-    """Find yt-dlp, including the user-local Scripts dir pip installs to."""
+def yt_dlp_command() -> list:
+    """Return an argv prefix that runs yt-dlp.
+
+    Prefers running it as a module through the current interpreter, which works
+    whenever the package is importable and does not depend on the console
+    script landing somewhere on PATH. Windows Store Python installs scripts
+    under a per-version LocalCache directory that is usually not on PATH, so
+    hunting for the .exe is the fragile path, not the reliable one.
+    """
+    try:
+        import yt_dlp  # noqa: F401
+        return [sys.executable, '-m', 'yt_dlp']
+    except ImportError:
+        pass
+
     exe = shutil.which('yt-dlp')
     if exe:
-        return exe
-    # Fallback: Scripts dir next to the current Python interpreter
-    scripts = os.path.join(os.path.dirname(sys.executable), 'Scripts', 'yt-dlp.exe')
-    if os.path.exists(scripts):
-        return scripts
-    # Another common location for Windows Store Python
-    local_scripts = os.path.join(
-        os.environ.get('LOCALAPPDATA', ''),
-        'Packages', 'PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0',
-        'LocalCache', 'local-packages', 'Python312', 'Scripts', 'yt-dlp.exe',
-    )
-    if os.path.exists(local_scripts):
-        return local_scripts
+        return [exe]
+
+    import glob
+    candidates = [os.path.join(os.path.dirname(sys.executable), 'Scripts',
+                               'yt-dlp.exe')]
+    candidates += glob.glob(os.path.join(
+        os.environ.get('LOCALAPPDATA', ''), 'Packages',
+        'PythonSoftwareFoundation.Python.*', 'LocalCache', 'local-packages',
+        'Python*', 'Scripts', 'yt-dlp.exe'))
+    for c in candidates:
+        if os.path.exists(c):
+            return [c]
+
     raise FileNotFoundError(
         'The video downloader (yt-dlp) is not installed. '
         'Open a terminal and run:  pip install yt-dlp  — then restart the app.'
     )
+
+
+def _yt_dlp_executable() -> str:
+    """Backwards-compatible shim for callers expecting a single path."""
+    return yt_dlp_command()[-1]
 
 
 def fetch_description(url: str) -> str:
@@ -169,7 +187,7 @@ def fetch_description(url: str) -> str:
     try:
         video_id = extract_video_id(url)
         proc = subprocess.run(
-            [_yt_dlp_executable(), '--skip-download', '--no-playlist',
+            [*yt_dlp_command(), '--skip-download', '--no-playlist',
              '--print', 'description',
              f'https://www.youtube.com/watch?v={video_id}'],
             capture_output=True, text=True, timeout=60, **kwargs)
@@ -205,7 +223,7 @@ def download_video(url: str, output_path: str, progress=None) -> str:
         kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
 
     cmd = [
-        _yt_dlp_executable(),
+        *yt_dlp_command(),
         '--format', fmt,
         '-o', template + '.%(ext)s',
         '--no-playlist',

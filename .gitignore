@@ -1,5 +1,6 @@
 # ── Credentials & tokens (NEVER commit these) ──────────────────
 client_secrets.json
+client_secret*.json
 yt_token.pickle
 *.pickle
 *.pkl

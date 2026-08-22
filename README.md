@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/codec-H.264%20YUV%204%3A2%3A0-green" alt="H.264 YUV 4:2:0">
   <img src="https://img.shields.io/badge/ECC-Reed--Solomon-orange" alt="Reed-Solomon">
   <img src="https://img.shields.io/badge/pixel%20engine-C%20native-red" alt="C native">
-  <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey" alt="GPL-3.0 License">
 </p>
 
 ---
@@ -346,4 +346,19 @@ README.
 
 ## License
 
-[MIT](LICENSE)
+Copyright (C) 2026 DaniDevML
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License version 3** as published by the
+Free Software Foundation, either version 3 of the License, or (at your option)
+any later version. See [LICENSE](LICENSE) for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.
+
+> Relicensed from MIT. Note that GPL-3.0 is copyleft: anyone distributing a
+> modified version must release their changes under the same licence. If you
+> also want that obligation to apply to people who run a modified version as a
+> network service without distributing it, use the GNU **Affero** GPL (AGPL-3.0)
+> instead — it is a drop-in swap of this file.
