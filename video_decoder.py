@@ -83,6 +83,15 @@ def _rs_decode_parallel(rs, arr: np.ndarray) -> bytes:
     return np.concatenate(outs).tobytes()
 
 
+# A screening pass was tried here and removed: re-encode each chunk's data half,
+# compare parity, and correct only the chunks that differ. At the ~1e-05 error
+# rate YouTube produces only about 2% of chunks are damaged, so it looked like a
+# large win. Measured, it was not one -- galois already short-circuits clean
+# chunks, so decode cost tracks the number of *erroneous* chunks rather than the
+# total. Correcting the 444 damaged chunks of a 20,000-chunk archive took 3.2 s
+# against 4.3 s to run the whole array through. Not worth the extra code path.
+
+
 def _rs_strip_parity(data: bytes, nroots: int = NROOTS) -> bytes:
     """Fast path: galois RS is systematic, data bytes come first — just slice."""
     chunk_size = 255

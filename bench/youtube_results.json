@@ -43,5 +43,28 @@
     "decode_s": 37.39847209999971,
     "recovered": true,
     "status": "ok"
+  },
+  {
+    "size_mb": 64.0,
+    "started": "2026-08-22 18:48:22",
+    "payload_bytes": 67108864,
+    "sha256": "c6a0b513c4d0676153708543db8839ddf23477552cf63a3cee6b040ea8c843fc",
+    "encode_s": 9.146684600000299,
+    "video_bytes": 211818865,
+    "expansion": 3.1563470512628555,
+    "approx_frames": 1198,
+    "duration_s": 39.93333333333333,
+    "upload_s": 108.15340419999848,
+    "video_id": "fdBvneSYTe8",
+    "url": "https://www.youtube.com/watch?v=fdBvneSYTe8",
+    "upload_mbps": 15.66803127959262,
+    "processing_wait_s": 50.3516907000012,
+    "sidecar_present": true,
+    "download_s": 8.484049500000765,
+    "downloaded_bytes": 165318105,
+    "download_mbps": 155.8860353183796,
+    "decode_s": 352.7148140999998,
+    "recovered": true,
+    "status": "ok"
   }
 ]
