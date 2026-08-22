@@ -140,6 +140,12 @@ worst case, since gzip cannot shrink them before encoding.
 `bench/bench_e2e.py`, best of 2–3 runs, byte-identity verified by SHA-256 on
 every run.
 
+> These figures were taken while v5 still used v4's 64,200 B/frame geometry, so
+> they isolate the *engineering* changes (pixel engine, quantiser, decode
+> architecture) from the later format change. The format now carries 56,100 B
+> per frame, which shifts the absolute times and the video size a little; the
+> real-YouTube table above is the current end-to-end reference.
+
 | Payload | | encode | decode | uploaded video |
 |---|---|---|---|---|
 | **4 MB** | v4 | 1.21 s | 2.51 s | 23.67 MB |
