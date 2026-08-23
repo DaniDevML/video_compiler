@@ -12,8 +12,35 @@
   <img src="https://img.shields.io/badge/codec-H.264%20YUV%204%3A2%3A0-green" alt="H.264 YUV 4:2:0">
   <img src="https://img.shields.io/badge/ECC-Reed--Solomon-orange" alt="Reed-Solomon">
   <img src="https://img.shields.io/badge/pixel%20engine-C%20native-red" alt="C native">
+  <img src="https://img.shields.io/badge/upload-2.14x%20parallel-0E7490" alt="Parallel upload">
   <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey" alt="GPL-3.0 License">
 </p>
+
+---
+
+---
+
+## Branches
+
+| branch | contains |
+|---|---|
+| `dev` | the original v4 codec |
+| `v5-max-throughput` | the v5 format and the single-video pipeline |
+| **`v6-parallel`** (this one) | v5 plus sharding across parallel videos and the M-ary audio channel |
+
+This branch is v5 with parallelism on top. **The frame format is unchanged** —
+everything under *The v5 format* below applies identically, and a video encoded
+on either branch decodes on both.
+
+What v6 adds is concurrency across videos. Upload dominates end-to-end time at
+any real size, and a single HTTP stream does not saturate the link: three
+concurrent uploads measured **39.9 Mbit/s against 18.6** for one. Sharding also
+lifts the per-video ceiling, which YouTube's 15-minute duration limit puts at
+about 1.27 GB.
+
+The audio channel moves from binary FSK to 4-FSK on this branch, 2.9x faster,
+though at 0.04% of total capacity that matters for redundancy rather than
+throughput.
 
 ---
 
@@ -432,7 +459,7 @@ Their real value is redundancy and speed of decode:
 
 ---
 
-# v6: parallel shards
+# Parallel shards
 
 An archive can be split across several videos: built once, cut into contiguous
 slices, each slice encoded as an independent video carrying a manifest (the
