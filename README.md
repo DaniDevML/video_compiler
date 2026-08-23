@@ -251,33 +251,40 @@ Uploading a coarser file degrades the source YouTube re-encodes *from*. The
 15% saving at qp51 is not worth the failure, so qp44 ships. This is the clearest
 illustration of why the local benchmarks cannot settle a format question.
 
-## The 1 GB sharded run: partly blocked
+## Known problem: the error-correction margin is thin
 
-The single-video 1 GB round trip completed and is the verified result above.
-The **sharded** 1 GB run is not finished: encoding completed (92.8 s for four
-shards, 3.39 GB of video), then YouTube refused further uploads with
-`uploadLimitExceeded` — a daily per-account video count limit, unrelated to
-size, reached after 13 test uploads that day. It resets in about 24 hours.
+A four-shard 1 GB upload through the web app did **not** recover. Three of the
+four videos decoded cleanly; the fourth lost the data outright, with 533,893 of
+its 1,248,917 blocks beyond repair. Re-downloading it gave the same result, so
+the stored rendition is damaged rather than the transfer.
 
-What that leaves measured, and what it does not:
+The cause is not sharding, and not the GUI. It is how little headroom the
+default profile leaves:
 
-| | status |
-|---|---|
-| 1 GB single video, full round trip | **measured**, bytes identical |
-| 1 GB sharded, encode stage | **measured** — 92.8 s, 3.39 GB across 4 shards |
-| 96 MB sharded, full round trip | **measured**, bytes identical |
-| 3-way parallel upload throughput | **measured** — 39.9 Mbit/s aggregate |
-| 1 GB sharded, full round trip | **not run** — blocked on the upload limit |
+| shard | delivered video | blocks repaired | result |
+|---|---|---|---|
+| 0 | **534 MB** | — | **unrecoverable** |
+| 1 | 658 MB | 172,332 / 1,248,917 (13.8%) | ok |
+| 2 | 658 MB | 172,699 / 1,248,917 (13.8%) | ok |
+| 3 | 656 MB | 156,997 / 1,248,917 (12.6%) | ok |
 
-Combining the measured parts *projects* roughly 17-18 minutes for the sharded
-1 GB round trip against the 35 minutes measured for the single video, but that
-is a projection from component measurements, not an observed result, and it
-assumes four concurrent streams aggregate like the three that were measured.
-To settle it once the limit resets:
+Every shard was the same size going in. YouTube transcoded one of them far
+harder than its siblings — 534 MB delivered against ~658 MB — and that was
+enough to cross the line. The healthy videos were already spending ~14% of
+their blocks on repair, so the normal operating point is closer to the edge
+than the small single-video tests suggested (the 8 MB round trip reported the
+same 13.7%, which looked fine in isolation).
 
-```bash
-python bench/bench_shards_upload.py 1024 4
-```
+**The measured fix is `PROFILE_ROBUST`** (Y 4px/2bpp + C 2px/2bpp). Probe 3
+put it at a 4.3e-07 bit error rate against the default's 1.1e-05 — 25x the
+margin — while also carrying 1.7x more per frame, at about 35% more uploaded
+bytes. That trade was rejected when upload was serial and one stream cost
+24 minutes per gigabyte; with shards uploading concurrently it looks very
+different. Switching the default needs its own round-trip validation, which is
+why this is written down rather than already done.
+
+Until then, treat multi-hundred-megabyte uploads on the default profile as
+needing verification after the fact, not as guaranteed.
 
 ## Where the gains came from
 

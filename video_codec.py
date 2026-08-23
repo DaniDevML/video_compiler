@@ -90,7 +90,25 @@ class Profile:
 # total bytes, and the dense profile is offered for the case where frame count
 # genuinely matters -- fitting a very large archive inside YouTube's per-video
 # duration limit.
+# KNOWN MARGIN PROBLEM. This profile normally runs with about 14% of its
+# Reed-Solomon blocks needing repair -- comfortable on average, but not a lot of
+# headroom, and YouTube's per-video encoding is not consistent. In a four-shard
+# 1 GB upload, three videos came back at 12.6-13.8% blocks repaired and decoded
+# cleanly while the fourth was transcoded far harder (534 MB delivered against
+# ~658 MB for its siblings, from identical input sizes) and lost the data
+# outright: 533,893 of 1,248,917 blocks beyond repair. Re-downloading gave the
+# same result, so it is the stored rendition that is damaged, not the transfer.
+#
+# The measured fix is PROFILE_ROBUST below, which probe 3 put at a 4.3e-07 bit
+# error rate against this profile's 1.1e-05 -- 25x the margin -- while also
+# carrying 1.7x more per frame. It was not the default because it uploads about
+# 35% more bytes, a trade that made sense when upload was serial and looks very
+# different now that shards upload concurrently.
 PROFILE_V5 = Profile(block_y=4, bpp_y=2, block_c=4, bpp_c=3, name='v5')
+
+# More error margin and more capacity, at a larger upload. Measured at a
+# 4.3e-07 bit error rate through real YouTube against the default's 1.1e-05.
+PROFILE_ROBUST = Profile(block_y=4, bpp_y=2, block_c=2, bpp_c=2, name='v5-robust')
 
 # Maximum payload per frame. 2.3x the bytes per frame of the default, at
 # roughly twice the uploaded size for the same payload.
