@@ -53,3 +53,6 @@ build/
 
 # ── Benchmark scratch output ──────────────────────────────────────
 bench/*.out
+
+# Web app scratch directory
+.scratch/

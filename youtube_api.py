@@ -42,6 +42,17 @@ def get_youtube_service():
     return build('youtube', 'v3', credentials=creds)
 
 
+def _close_media(media) -> None:
+    """Close the file object behind a MediaFileUpload, if it still has one."""
+    for attr in ('_fd', '_file'):
+        fh = getattr(media, attr, None)
+        if fh is not None and hasattr(fh, 'close'):
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+
 def _read_sidecar(video_path: str) -> str:
     """The header line the encoder wrote next to the video, if present."""
     path = video_path + '.sidecar'
@@ -103,12 +114,20 @@ def upload_video(video_path: str, title: str = 'Data Archive', progress=None) ->
     )
 
     log('Uploading to YouTube...')
-    response = None
-    while response is None:
-        status, response = request.next_chunk()
-        if status:
-            pct = int(status.progress() * 100)
-            log(f'Upload progress: {pct}%')
+    try:
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                pct = int(status.progress() * 100)
+                log(f'Upload progress: {pct}%')
+    finally:
+        # MediaFileUpload keeps the source file open for the life of the
+        # request. On Windows an open handle blocks deletion outright, so the
+        # caller could never clean up its temporary video -- leaking a file the
+        # size of the whole upload after every job. Release it here, whether
+        # the upload succeeded or not.
+        _close_media(media)
 
     video_id = response['id']
     url = f'https://www.youtube.com/watch?v={video_id}'

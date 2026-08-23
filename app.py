@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import shutil
 import tempfile
 import threading
 import uuid
@@ -16,7 +17,28 @@ os.environ.setdefault('NUMBA_CACHE_DIR', _numba_cache)
 from flask import Flask, Response, jsonify, request, send_from_directory, send_file
 
 app = Flask(__name__, static_folder='static')
-app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024  # 512 MB upload limit
+
+# No hard cap on the upload. A 512 MB limit contradicted the whole point of the
+# tool -- a 1 GB file was rejected with a 413 before anything else ran. Set
+# VIDCOMPILER_MAX_UPLOAD_MB to reinstate one.
+_max_mb = os.environ.get('VIDCOMPILER_MAX_UPLOAD_MB')
+app.config['MAX_CONTENT_LENGTH'] = int(_max_mb) * 1024 * 1024 if _max_mb else None
+
+# Scratch directory. Everything transient lands here: the uploaded copy, the
+# encoded video (about 3x the payload), and the downloaded copy on the way
+# back. That is roughly 7x the payload, which is far more than a system temp
+# directory usually has room for -- so it defaults to a folder beside the app
+# rather than to the system drive. Override with VIDCOMPILER_SCRATCH.
+SCRATCH = os.environ.get(
+    'VIDCOMPILER_SCRATCH',
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '.scratch'))
+os.makedirs(SCRATCH, exist_ok=True)
+tempfile.tempdir = SCRATCH
+os.environ['TMP'] = os.environ['TEMP'] = os.environ['TMPDIR'] = SCRATCH
+
+
+def scratch_free_gb() -> float:
+    return shutil.disk_usage(SCRATCH).free / 1e9
 
 # In-memory job registry  {job_id: {'q': Queue, 'result': dict}}
 _jobs: dict = {}
@@ -58,6 +80,7 @@ def _job_error(job_id: str, msg: str):
 def _encode_worker(job_id: str, file_paths: list, title: str):
     progress = lambda m: _job_progress(job_id, m)
     tmp_video = None
+    encoded_ok = False
     try:
         from video_encoder import encode_files_to_video
         from youtube_api import upload_video
@@ -65,18 +88,41 @@ def _encode_worker(job_id: str, file_paths: list, title: str):
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tf:
             tmp_video = tf.name  # close the handle before ffmpeg writes to it
         encode_files_to_video(file_paths, tmp_video, progress=progress)
+        encoded_ok = True
 
         _video_id, url = upload_video(tmp_video, title=title, progress=progress)
         _job_done(job_id, url=url, video_id=_video_id)
 
     except Exception as exc:
+        # Keep the encoded video if the upload is what failed. Encoding a large
+        # archive costs minutes, and the usual upload failures -- a daily quota,
+        # a dropped connection -- are worth retrying against rather than
+        # re-encoding from scratch.
+        if encoded_ok and tmp_video and os.path.exists(tmp_video):
+            kept = os.path.join(SCRATCH, f'encoded_{job_id[:8]}.mp4')
+            try:
+                shutil.move(tmp_video, kept)
+                if os.path.exists(tmp_video + '.sidecar'):
+                    shutil.move(tmp_video + '.sidecar', kept + '.sidecar')
+                tmp_video = None
+                _job_progress(job_id, f'Upload failed; the encoded video was '
+                                      f'kept at {kept}')
+            except OSError:
+                pass
         _job_error(job_id, str(exc))
     finally:
+        # Cleanup must never raise. An exception here runs after the result has
+        # been queued but before the thread returns, and it killed the worker
+        # silently -- the browser then waited on a status stream that would
+        # never produce a result.
         if tmp_video and os.path.exists(tmp_video):
-            os.unlink(tmp_video)
+            try:
+                os.unlink(tmp_video)
+            except OSError as e:
+                _job_progress(job_id, f'Note: could not remove the temporary '
+                                      f'video ({e.__class__.__name__}).')
         for fp in file_paths:
             try:
-                import shutil
                 shutil.rmtree(fp) if os.path.isdir(fp) else os.unlink(fp)
             except Exception:
                 pass
