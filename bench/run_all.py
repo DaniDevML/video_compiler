@@ -15,6 +15,7 @@ TESTS = [
     ('native pixel engine',    'test_native.py'),
     ('native Reed-Solomon',    'test_rs_native.py'),
     ('end-to-end pipeline',    'test_e2e.py'),
+    ('shard split/reassemble', 'test_shards.py'),
     ('description sidecar',    'test_sidecar.py'),
     ('audio channel',          'test_audio.py'),
     ('audio header fallback',  'test_audio_fallback.py'),

@@ -42,6 +42,13 @@ except ImportError:
 
 _CANDIDATE_BLOCK_SIZES = [4, 16]
 
+# Passed as output_dir to ask for the raw payload instead of extracted files.
+class _BytesSentinel:
+    pass
+
+
+_BYTES_SENTINEL = _BytesSentinel()
+
 # Profiles the header frame might be written in. v5 always uses PROFILE_HEADER;
 # v4 and v3 wrote the header frame in their own payload format.
 _HEADER_PROFILES = [PROFILE_HEADER, PROFILE_V4, PROFILE_V3]
@@ -600,18 +607,23 @@ def _require_all_frames(frames_read: int, num_data_frames: int) -> None:
         )
 
 
-def _finish_decode(header: dict, encoded_bytes: bytes,
-                   output_dir: str, log) -> list:
+def _recover_payload(header: dict, encoded_bytes: bytes, log) -> bytes:
+    """Strip parity, repair if needed, and verify the CRC.
+
+    Returns the payload this video carries. For a whole archive that is the
+    tar.gz; for a shard it is a slice of one, which is why this stops short of
+    extracting anything.
+    """
     nroots = header['nroots']
 
     log('Verifying data integrity...')
-    archive_bytes = _rs_strip_parity(encoded_bytes, nroots)[:header['archive_size']]
-    actual_crc    = zlib.crc32(archive_bytes) & 0xFFFFFFFF
+    payload    = _rs_strip_parity(encoded_bytes, nroots)[:header['archive_size']]
+    actual_crc = zlib.crc32(payload) & 0xFFFFFFFF
 
     if actual_crc != header['crc32']:
         log('Errors detected, applying Reed-Solomon correction...')
-        archive_bytes = rs_decode(encoded_bytes, header['archive_size'], nroots=nroots)
-        actual_crc    = zlib.crc32(archive_bytes) & 0xFFFFFFFF
+        payload    = rs_decode(encoded_bytes, header['archive_size'], nroots=nroots)
+        actual_crc = zlib.crc32(payload) & 0xFFFFFFFF
         if actual_crc != header['crc32']:
             raise RuntimeError(
                 'The recovered data failed its integrity check even after error correction. '
@@ -620,12 +632,33 @@ def _finish_decode(header: dict, encoded_bytes: bytes,
             )
     else:
         log('CRC32 OK — no errors.')
+    return payload
 
+
+def _extract_archive(archive_bytes: bytes, output_dir: str, log) -> list:
     log('Extracting files...')
     os.makedirs(output_dir, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode='r:gz') as tar:
         tar.extractall(output_dir)
         names = tar.getnames()
-
     log(f'Done! Extracted {len(names)} item(s).')
     return names
+
+
+def _finish_decode(header: dict, encoded_bytes: bytes,
+                   output_dir: str, log) -> list:
+    archive_bytes = _recover_payload(header, encoded_bytes, log)
+    if output_dir is _BYTES_SENTINEL:
+        return archive_bytes
+    return _extract_archive(archive_bytes, output_dir, log)
+
+
+def decode_video_to_bytes(video_path: str, progress=None,
+                          description: str = '') -> bytes:
+    """Decode a video to the raw bytes it carries, without extracting.
+
+    This is the shard entry point: a shard holds a slice of an archive, so it
+    must not be handed to tar.
+    """
+    return decode_video_to_files(video_path, _BYTES_SENTINEL,
+                                 progress=progress, description=description)

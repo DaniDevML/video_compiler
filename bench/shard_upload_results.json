@@ -1,0 +1,40 @@
+[
+  {
+    "size_mb": 96.0,
+    "n_shards": 3,
+    "started": "2026-08-23 13:37:04",
+    "encode_s": 10.927364199999829,
+    "video_bytes": 317743440,
+    "upload_wall_s": 63.7643822,
+    "uploads": [
+      {
+        "index": 0,
+        "video_id": "Seehpj5J5_s",
+        "url": "https://www.youtube.com/watch?v=Seehpj5J5_s",
+        "bytes": 105914592,
+        "seconds": 62.86173890000009
+      },
+      {
+        "index": 1,
+        "video_id": "qjBNRIryxUg",
+        "url": "https://www.youtube.com/watch?v=qjBNRIryxUg",
+        "bytes": 105913214,
+        "seconds": 63.31610389999969
+      },
+      {
+        "index": 2,
+        "video_id": "Fc798hU7ZyU",
+        "url": "https://www.youtube.com/watch?v=Fc798hU7ZyU",
+        "bytes": 105915634,
+        "seconds": 63.763456900000165
+      }
+    ],
+    "upload_aggregate_mbps": 39.8646929884314,
+    "processing_s": 48.25629730000037,
+    "download_wall_s": 10.492820700000266,
+    "download_aggregate_mbps": 189.83988852491774,
+    "decode_s": 11.913795499999651,
+    "recovered": true,
+    "status": "ok"
+  }
+]

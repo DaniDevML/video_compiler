@@ -198,6 +198,25 @@ ENCODE_BATCH = 8
 
 
 def encode_files_to_video(file_paths: list, output_path: str, progress=None):
+    """Archive `file_paths` and write the whole thing to one video."""
+    def log(msg):
+        if progress:
+            progress(msg)
+    log('Creating archive...')
+    archive = create_archive(file_paths)
+    log(f'Archive: {len(archive):,} bytes.')
+    return encode_bytes_to_video(archive, output_path, progress=progress)
+
+
+def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
+                          extra_sidecar: str = ''):
+    """Write an arbitrary byte string to one video.
+
+    Split out from encode_files_to_video so a shard -- a slice of a larger
+    archive, not a valid archive on its own -- can be encoded by the same path.
+    `extra_sidecar` is appended to the .sidecar file, which is how the shard
+    manifest travels alongside the header.
+    """
     def log(msg):
         if progress:
             progress(msg)
@@ -209,11 +228,9 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
     else:
         log('Pixel engine: NumPy fallback  —  run  python native/build.py  for faster encoding')
 
-    log('Creating archive...')
-    archive      = create_archive(file_paths)
     archive_size = len(archive)
     archive_crc  = zlib.crc32(archive) & 0xFFFFFFFF
-    log(f'Archive: {archive_size:,} bytes. Applying error correction...')
+    log('Applying error correction...')
 
     encoded      = rs_encode(archive)
     encoded_size = len(encoded)
@@ -319,6 +336,8 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
     # description, giving the decoder a lossless copy of the header.
     with open(output_path + '.sidecar', 'w', encoding='utf-8') as f:
         f.write(encode_sidecar(header_raw))
+        if extra_sidecar:
+            f.write(chr(10) + extra_sidecar)
     return output_path
 
 

@@ -1,37 +1,16 @@
 """
-audio_codec.py — Store extra bytes in the video's audio channel using binary FSK.
+audio_codec.py — Store extra bytes in the video's audio channel using M-ary FSK.
 
-How it works:
-  The audio track carries a continuous FSK (Frequency-Shift Keying) signal:
-    bit 0 → sine wave at FREQ_0 (1 500 Hz)
-    bit 1 → sine wave at FREQ_1 (3 000 Hz)
+Each symbol is one of M tones, carrying log2(M) bits. The tone set, symbol rate
+and spacing were chosen by measurement against a real AAC round trip rather
+than by argument; see the parameter block below and bench/sweep_audio_mary.py.
 
-  Symbol duration = SAMPLES_PER_BIT / SAMPLE_RATE = 441 / 44 100 = 10 ms
-  Raw throughput  = 100 bits/sec = 12.5 bytes/sec
+The payload is Reed-Solomon protected with the same RS(255, 215) as the video
+codec, so the audio channel can correct up to 20 byte errors per 255-byte chunk.
 
-  Why such a conservative rate?
-    YouTube re-encodes audio to AAC 128 kbps.  AAC uses psychoacoustic masking
-    and quantisation noise shaping.  At 10 ms per symbol the decoder can average
-    many samples before deciding, making it robust to AAC-introduced distortion.
-    A 1 500 Hz / 3 000 Hz frequency pair sits well within AAC's flat-response
-    band (20 Hz – 16 kHz), so both tones survive with negligible distortion.
-
-  Reed-Solomon error correction is applied to the audio payload too (same
-  RS(255, 215) as the video codec) so the audio channel can correct up to 20
-  byte-errors per 255-byte chunk.
-
-Capacity example:
-  A 216 MB file takes ≈ 90 minutes of video at the v3 pixel data rate.
-  Audio adds 12.5 bytes/sec × 5 400 sec = 67 500 bytes ≈ 67 KB bonus.
-  That is small relative to the main payload, but it is essentially free
-  because the audio track has to exist anyway and YouTube keeps it.
-
-  For small files (≤ a few KB) the audio channel alone could carry the data —
-  no video frames needed — which could be a future optimisation.
-
-Reed-Solomon import note:
-  Uses the same galois-based RS as the rest of the codec (loaded lazily so this
-  module can be imported without triggering the galois/numba JIT warmup).
+Scale, honestly: at 609 payload bytes/s against the pixel channel's 1.68 MB/s,
+audio contributes about 0.04% of total capacity. Its value is redundancy -- it
+carries a backup copy of the header -- not throughput.
 """
 
 import math
@@ -40,12 +19,70 @@ import struct
 import numpy as np
 
 # ─── Audio parameters ────────────────────────────────────────────────────────
+#
+# M-ary FSK: each symbol is one of M = 2^BITS_PER_SYMBOL tones, carrying
+# BITS_PER_SYMBOL bits instead of one.
+#
+# The tones must stay orthogonal over a symbol, which requires a spacing of at
+# least the symbol rate (1/T). That couples the three knobs: with usable
+# bandwidth B, M tones at spacing Rs need M*Rs <= B, so the throughput
+# log2(M)*Rs is bounded by log2(M)/M * B -- which is maximised near M = 3.
+# Pure bandwidth arguments therefore say M-ary FSK barely beats binary.
+#
+# What tips it is that the channel is AAC, not white noise. AAC's transform
+# smears very short symbols, so there is a floor on symbol duration that has
+# nothing to do with bandwidth; below roughly 8 samples per symbol binary FSK
+# stops working however much bandwidth is free. M-ary buys more bits per symbol
+# at a symbol duration AAC can actually preserve.
+#
+# Measured, the theory holds: sweeping every viable combination through a real
+# AAC 128k round trip, 4-FSK at 3150 symbols/s wins at 6300 raw bits/s. That is
+# the bandwidth-limited optimum -- the next symbol rate up would push the top
+# tone past AAC's cutoff. 8-FSK and 16-FSK both work but carry less.
+# 609 payload bytes/s, 2.83x the previous binary setting.
+# See bench/sweep_audio_mary.py.
 SAMPLE_RATE       = 44_100   # Hz
-FREQ_0            = 3_000    # Hz  (represents bit 0)
-FREQ_1            = 6_000    # Hz  (represents bit 1)
-BITS_PER_SEC      = 2_100    # symbol rate  (divides SAMPLE_RATE exactly)
-SAMPLES_PER_BIT   = SAMPLE_RATE // BITS_PER_SEC   # 21 samples / bit
+BITS_PER_SYMBOL   = 2        # M = 4 tones
+SYMBOL_RATE       = 3_150    # symbols/sec (must divide SAMPLE_RATE)
+SAMPLES_PER_SYMBOL = SAMPLE_RATE // SYMBOL_RATE   # 14 samples/symbol
+FREQ_BASE         = 3_150    # Hz, lowest tone
+FREQ_SPACING      = 3_150    # Hz between tones; top tone lands at 12.6 kHz
 AMPLITUDE         = 0.25     # fraction of full scale (keeps headroom for AAC)
+
+# Derived
+N_TONES           = 1 << BITS_PER_SYMBOL
+BITS_PER_SEC      = SYMBOL_RATE * BITS_PER_SYMBOL
+
+# Legacy aliases: binary-FSK names kept so older callers still resolve.
+SAMPLES_PER_BIT   = SAMPLES_PER_SYMBOL
+FREQ_0            = FREQ_BASE
+FREQ_1            = FREQ_BASE + FREQ_SPACING
+
+
+def tone_freqs():
+    """The M tone frequencies, one per symbol value."""
+    return [FREQ_BASE + i * FREQ_SPACING for i in range(N_TONES)]
+
+
+def configure(bits_per_symbol=None, symbol_rate=None,
+              freq_base=None, freq_spacing=None):
+    """Reconfigure the modem. Used by the sweep benchmarks."""
+    global BITS_PER_SYMBOL, SYMBOL_RATE, SAMPLES_PER_SYMBOL, FREQ_BASE
+    global FREQ_SPACING, N_TONES, BITS_PER_SEC, SAMPLES_PER_BIT
+    global FREQ_0, FREQ_1, PREAMBLE_SYMS, SILENCE_SYMS
+    if bits_per_symbol is not None: BITS_PER_SYMBOL = bits_per_symbol
+    if symbol_rate     is not None: SYMBOL_RATE = symbol_rate
+    if freq_base       is not None: FREQ_BASE = freq_base
+    if freq_spacing    is not None: FREQ_SPACING = freq_spacing
+    SAMPLES_PER_SYMBOL = SAMPLE_RATE // SYMBOL_RATE
+    N_TONES = 1 << BITS_PER_SYMBOL
+    BITS_PER_SEC = SYMBOL_RATE * BITS_PER_SYMBOL
+    SAMPLES_PER_BIT = SAMPLES_PER_SYMBOL
+    FREQ_0 = FREQ_BASE
+    FREQ_1 = FREQ_BASE + FREQ_SPACING
+    PREAMBLE_SYMS = int(PREAMBLE_SECS * SYMBOL_RATE)
+    SILENCE_SYMS = int(SILENCE_SECS * SYMBOL_RATE)
+
 
 # RS params (same as video codec to reuse the pre-warmed galois RS object)
 AUDIO_NROOTS  = 40
@@ -55,8 +92,10 @@ AUDIO_CHUNK_IN = 255 - AUDIO_NROOTS  # 215
 # The decoder looks for this pattern to find the start of encoded data.
 PREAMBLE_SECS  = 0.5
 SILENCE_SECS   = 0.25
-PREAMBLE_BITS  = int(PREAMBLE_SECS  * BITS_PER_SEC)
-SILENCE_BITS   = int(SILENCE_SECS   * BITS_PER_SEC)
+PREAMBLE_SYMS  = int(PREAMBLE_SECS * SYMBOL_RATE)
+SILENCE_SYMS   = int(SILENCE_SECS  * SYMBOL_RATE)
+PREAMBLE_BITS  = PREAMBLE_SYMS      # legacy alias
+SILENCE_BITS   = SILENCE_SYMS
 
 # Sync word placed right after the preamble (8 bytes = 64 bits)
 SYNC_WORD = b'\xAA\x55\xAA\x55\xDE\xAD\xBE\xEF'
@@ -100,101 +139,110 @@ def _rs_decode_audio(data: bytes) -> bytes:
     return np.asarray(dec, dtype=np.uint8).tobytes()
 
 
-# ─── Phase-continuous FSK signal generation ──────────────────────────────────
+# --- M-ary FSK modulation ---------------------------------------------------
 
-def _bits_to_signal(bits: np.ndarray) -> np.ndarray:
-    """Convert 0/1 bit array to a phase-continuous FSK float32 signal.
+def _bits_to_symbols(bits: np.ndarray) -> np.ndarray:
+    """Pack a 0/1 bit array into symbol values, MSB first, zero-padded."""
+    k = BITS_PER_SYMBOL
+    pad = (-len(bits)) % k
+    if pad:
+        bits = np.concatenate([bits, np.zeros(pad, dtype=np.uint8)])
+    g = bits.reshape(-1, k).astype(np.uint16)
+    weights = (1 << np.arange(k - 1, -1, -1)).astype(np.uint16)
+    return (g * weights).sum(axis=1).astype(np.uint16)
 
-    Generates per-symbol sine chunks and concatenates them, keeping phase
-    continuity between symbols by tracking the accumulated phase offset.
+
+def _symbols_to_bits(syms: np.ndarray, n_bits: int) -> np.ndarray:
+    k = BITS_PER_SYMBOL
+    out = np.empty((len(syms), k), dtype=np.uint8)
+    for i in range(k):
+        out[:, i] = (syms >> (k - 1 - i)) & 1
+    return out.reshape(-1)[:n_bits]
+
+
+def _symbols_to_signal(syms: np.ndarray) -> np.ndarray:
+    """Phase-continuous M-ary FSK.
+
+    Phase carries across symbol boundaries: a discontinuity there spreads
+    energy across the whole band, which wastes power and hands AAC a transient
+    to smear.
     """
-    spb   = SAMPLES_PER_BIT
-    t     = np.arange(spb, dtype=np.float64) / SAMPLE_RATE
-    w0    = 2.0 * math.pi * FREQ_0
-    w1    = 2.0 * math.pi * FREQ_1
+    sps = SAMPLES_PER_SYMBOL
+    t = np.arange(sps, dtype=np.float64) / SAMPLE_RATE
+    w = 2.0 * math.pi * np.asarray(tone_freqs(), dtype=np.float64)
 
-    # Pre-compute one full cycle of each tone (per-symbol)
-    phase_inc_0 = w0 * spb / SAMPLE_RATE
-    phase_inc_1 = w1 * spb / SAMPLE_RATE
-
-    out   = np.empty(len(bits) * spb, dtype=np.float32)
+    out = np.empty(len(syms) * sps, dtype=np.float32)
     phase = 0.0
-
-    for i, b in enumerate(bits):
-        w = w1 if b else w0
-        chunk = np.sin(phase + w * t) * AMPLITUDE
-        out[i * spb:(i + 1) * spb] = chunk.astype(np.float32)
-        phase += w * spb / SAMPLE_RATE
-
+    for i, sym in enumerate(syms):
+        wi = w[int(sym)]
+        out[i * sps:(i + 1) * sps] = np.sin(phase + wi * t) * AMPLITUDE
+        phase = (phase + wi * sps / SAMPLE_RATE) % (2.0 * math.pi)
     return out
 
 
+def _bits_to_signal(bits: np.ndarray) -> np.ndarray:
+    """Legacy name: bits in, modulated signal out."""
+    return _symbols_to_signal(_bits_to_symbols(np.asarray(bits, dtype=np.uint8)))
+
+
 def _make_preamble_signal() -> np.ndarray:
-    """Tone at FREQ_0 for PREAMBLE_SECS, then silence for SILENCE_SECS."""
-    t_pre = np.arange(int(PREAMBLE_SECS * SAMPLE_RATE)) / SAMPLE_RATE
-    tone  = (np.sin(2.0 * math.pi * FREQ_0 * t_pre) * AMPLITUDE).astype(np.float32)
+    """A steady tone at the lowest constellation tone, then silence.
+
+    The decoder locks on by finding a long run of symbols whose strongest tone
+    is tone 0, so the preamble has to use a frequency the demodulator measures.
+    """
+    n = int(PREAMBLE_SECS * SAMPLE_RATE)
+    t = np.arange(n) / SAMPLE_RATE
+    tone = (np.sin(2.0 * math.pi * FREQ_BASE * t) * AMPLITUDE).astype(np.float32)
     silence = np.zeros(int(SILENCE_SECS * SAMPLE_RATE), dtype=np.float32)
     return np.concatenate([tone, silence])
 
 
-# ─── Public API ───────────────────────────────────────────────────────────────
+# --- Public API --------------------------------------------------------------
 
 def encode_audio(payload: bytes, total_samples: int) -> np.ndarray:
-    """
-    Encode payload bytes as an FSK audio signal.
-
-    Parameters
-    ----------
-    payload       : bytes to embed
-    total_samples : total number of PCM samples needed (= video_frames * samples_per_frame)
-
-    Returns
-    -------
-    float32 array of length total_samples, range [-1, 1], suitable for feeding
-    to ffmpeg as s16le after scaling (or directly as f32le).
-    """
+    """Encode payload bytes as an M-ary FSK signal, float32 in [-1, 1]."""
     rs_payload = _rs_encode_audio(payload)
     # Both lengths are needed: the RS length says how many bytes to read off
-    # the wire, the payload length says where the zero padding that was added
-    # to fill the last RS chunk begins. Recording only the former made exact
-    # recovery impossible, since the decoder could not tell payload from pad.
-    prefix     = struct.pack('<II', len(payload), len(rs_payload))
-    data_bits  = np.unpackbits(
-        np.frombuffer(prefix + rs_payload, dtype=np.uint8)
-    )
-    sync_bits  = np.unpackbits(np.frombuffer(SYNC_WORD, dtype=np.uint8))
+    # the wire, the payload length says where the zero padding added to fill
+    # the last RS chunk begins.
+    prefix = struct.pack('<II', len(payload), len(rs_payload))
 
-    preamble_sig = _make_preamble_signal()
-    sync_sig     = _bits_to_signal(sync_bits)
-    data_sig     = _bits_to_signal(data_bits)
+    # Each section is modulated separately so it starts on a symbol boundary.
+    # Packing them as one bit stream breaks whenever BITS_PER_SYMBOL does not
+    # divide the section length -- with 3 bits/symbol the 64-bit prefix ends
+    # two thirds of the way through a symbol, and the decoder, which reads each
+    # section at a symbol offset, then starts the payload in the wrong place.
+    content = np.concatenate([
+        _make_preamble_signal(),
+        _bits_to_signal(np.unpackbits(np.frombuffer(SYNC_WORD, dtype=np.uint8))),
+        _bits_to_signal(np.unpackbits(np.frombuffer(prefix, dtype=np.uint8))),
+        _bits_to_signal(np.unpackbits(np.frombuffer(rs_payload, dtype=np.uint8))),
+    ])
 
-    content = np.concatenate([preamble_sig, sync_sig, data_sig])
-
-    # Fit into total_samples (truncate or zero-pad)
     out = np.zeros(total_samples, dtype=np.float32)
-    n   = min(len(content), total_samples)
+    n = min(len(content), total_samples)
     out[:n] = content[:n]
     return out
 
 
+def _syms_for_bits(n_bits: int) -> int:
+    return -(-n_bits // BITS_PER_SYMBOL)
+
+
 def max_payload_bytes(total_samples: int) -> int:
-    """
-    How many raw (pre-RS) bytes fit in an audio track of total_samples samples.
-    """
-    overhead_samples = (
+    """How many raw (pre-RS) bytes fit in an audio track of this length."""
+    overhead = (
         int(PREAMBLE_SECS * SAMPLE_RATE) +
-        int(SILENCE_SECS  * SAMPLE_RATE) +
-        len(SYNC_WORD) * 8 * SAMPLES_PER_BIT +
-        8 * 8 * SAMPLES_PER_BIT          # 8-byte length prefix
+        int(SILENCE_SECS * SAMPLE_RATE) +
+        _syms_for_bits(len(SYNC_WORD) * 8) * SAMPLES_PER_SYMBOL +
+        _syms_for_bits(8 * 8) * SAMPLES_PER_SYMBOL
     )
-    available_samples = total_samples - overhead_samples
-    if available_samples <= 0:
+    available = total_samples - overhead
+    if available <= 0:
         return 0
-    rs_bits   = available_samples // SAMPLES_PER_BIT
-    rs_bytes  = rs_bits // 8
-    # RS chunks: each 255-byte chunk encodes 215 raw bytes
-    n_chunks  = rs_bytes // 255
-    return n_chunks * AUDIO_CHUNK_IN
+    rs_bytes = (available // SAMPLES_PER_SYMBOL) * BITS_PER_SYMBOL // 8
+    return (rs_bytes // 255) * AUDIO_CHUNK_IN
 
 
 def float32_to_s16(sig: np.ndarray) -> bytes:
@@ -203,129 +251,100 @@ def float32_to_s16(sig: np.ndarray) -> bytes:
     return s16.tobytes()
 
 
-# ─── Decoder ─────────────────────────────────────────────────────────────────
+# --- Demodulator -------------------------------------------------------------
 
-def decode_audio(pcm_s16: bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
+def _tone_energies(chunks: np.ndarray) -> np.ndarray:
+    """(n_chunks, sps) -> (n_chunks, M) energy at each tone.
+
+    One complex DFT bin per tone, as a single matrix product rather than a
+    Goertzel recurrence per tone.
     """
-    Attempt to recover the payload from raw s16le mono PCM bytes.
-
-    Returns the decoded payload bytes, or b'' if decoding fails / no data found.
-    """
-    if sample_rate != SAMPLE_RATE:
-        # Resample (simple nearest-neighbour — good enough for robustness testing)
-        sig_in  = np.frombuffer(pcm_s16, dtype=np.int16).astype(np.float32) / 32768.0
-        ratio   = SAMPLE_RATE / sample_rate
-        new_len = int(len(sig_in) * ratio)
-        idx     = (np.arange(new_len) / ratio).astype(int)
-        idx     = np.clip(idx, 0, len(sig_in) - 1)
-        sig     = sig_in[idx]
-    else:
-        sig = np.frombuffer(pcm_s16, dtype=np.int16).astype(np.float32) / 32768.0
-
-    spb = SAMPLES_PER_BIT
-
-    # ── Find preamble: look for a long run of FREQ_0 ───────────────────────
-    # Use energy in FREQ_0 band via per-symbol Goertzel
-    preamble_start = _find_preamble(sig, spb)
-    if preamble_start < 0:
-        return b''
-
-    # Skip preamble + silence
-    data_start = preamble_start + int((PREAMBLE_SECS + SILENCE_SECS) * SAMPLE_RATE)
-
-    # ── Read sync word ─────────────────────────────────────────────────────
-    sync_n    = len(SYNC_WORD) * 8
-    sync_bits = _demod_bits(sig[data_start:], sync_n, spb)
-    got_sync  = np.packbits(sync_bits).tobytes()
-    if got_sync != SYNC_WORD:
-        return b''
-
-    data_start += sync_n * spb
-
-    # ── Read the 8-byte length prefix (payload length, RS length) ──────────
-    len_bits   = _demod_bits(sig[data_start:], 64, spb)
-    payload_length, rs_length = struct.unpack(
-        '<II', np.packbits(len_bits).tobytes())
-    data_start += 64 * spb
-
-    if rs_length == 0 or rs_length > len(sig) // spb // 8:
-        return b''
-    if payload_length > rs_length:
-        return b''
-
-    # ── Read RS-encoded payload ────────────────────────────────────────────
-    total_bits  = rs_length * 8
-    rs_bits_arr = _demod_bits(sig[data_start:], total_bits, spb)
-    rs_bytes    = np.packbits(rs_bits_arr).tobytes()[:rs_length]
-
-    try:
-        return _rs_decode_audio(rs_bytes)[:payload_length]
-    except Exception:
-        return b''
+    n = chunks.shape[1]
+    t = np.arange(n, dtype=np.float64)
+    freqs = np.asarray(tone_freqs(), dtype=np.float64)
+    basis = np.exp(-2j * math.pi * np.outer(freqs, t) / SAMPLE_RATE)
+    coeff = chunks.astype(np.float64) @ basis.T
+    return np.abs(coeff) ** 2
 
 
-def _goertzel_batch(chunks: np.ndarray, freq: float, fs: float) -> np.ndarray:
-    """Vectorized Goertzel: compute energy at `freq` for all chunks at once.
-
-    Uses DFT bin computation via NumPy dot product — avoids the N-step
-    recurrence loop entirely.
-
-    chunks : (n_chunks, spb) float32/64
-    Returns: (n_chunks,) float64 energy values
-    """
-    N     = chunks.shape[1]
-    k     = freq * N / fs
-    n     = np.arange(N, dtype=np.float64)
-    # Complex DFT basis vector for the target frequency bin
-    basis = np.exp(-2j * math.pi * k * n / N)           # (N,)
-    # Dot product gives the DFT coefficient for each chunk
-    coeff = chunks.astype(np.float64) @ basis            # (n_chunks,)
-    return np.abs(coeff) ** 2                            # energy
+def _demod_symbols(sig: np.ndarray, n_syms: int) -> np.ndarray:
+    sps = SAMPLES_PER_SYMBOL
+    avail = len(sig) // sps
+    n = min(n_syms, avail)
+    if n <= 0:
+        return np.zeros(n_syms, dtype=np.uint16)
+    e = _tone_energies(sig[:n * sps].reshape(n, sps))
+    syms = np.argmax(e, axis=1).astype(np.uint16)
+    if n < n_syms:
+        syms = np.concatenate([syms, np.zeros(n_syms - n, dtype=np.uint16)])
+    return syms
 
 
-def _demod_bits(sig: np.ndarray, n_bits: int, spb: int) -> np.ndarray:
-    """Demodulate n_bits from the FSK signal using batch Goertzel."""
-    available = len(sig) // spb
-    n = min(n_bits, available)
-    if n == 0:
-        return np.zeros(n_bits, dtype=np.uint8)
-
-    chunks = sig[:n * spb].reshape(n, spb)
-    e0 = _goertzel_batch(chunks, FREQ_0, SAMPLE_RATE)
-    e1 = _goertzel_batch(chunks, FREQ_1, SAMPLE_RATE)
-    bits = (e1 > e0).astype(np.uint8)
-
-    if n < n_bits:
-        bits = np.concatenate([bits, np.zeros(n_bits - n, dtype=np.uint8)])
-    return bits
+def _demod_bits(sig: np.ndarray, n_bits: int, spb: int = None) -> np.ndarray:
+    return _symbols_to_bits(_demod_symbols(sig, _syms_for_bits(n_bits)), n_bits)
 
 
-def _find_preamble(sig: np.ndarray, spb: int) -> int:
-    """
-    Scan for a run of at least PREAMBLE_BITS consecutive FREQ_0 symbols.
-    Returns the sample index of the first preamble symbol, or -1 if not found.
-    Vectorized: processes all symbols at once then scans the boolean array.
-    """
-    required   = PREAMBLE_BITS
-    n_symbols  = len(sig) // spb
-    if n_symbols == 0:
+def _find_preamble(sig: np.ndarray, spb: int = None) -> int:
+    """Sample index where the preamble tone starts, or -1."""
+    sps = SAMPLES_PER_SYMBOL
+    n_syms = len(sig) // sps
+    if n_syms == 0:
         return -1
+    e = _tone_energies(sig[:n_syms * sps].reshape(n_syms, sps))
+    strongest = np.argmax(e, axis=1)
+    total = e.sum(axis=1) + 1e-12
+    # Tone 0 must dominate, not merely win: silence has an argmax too.
+    is_pre = (strongest == 0) & (e[:, 0] / total > 0.5)
 
-    chunks = sig[:n_symbols * spb].reshape(n_symbols, spb)
-    e0 = _goertzel_batch(chunks, FREQ_0, SAMPLE_RATE)
-    e1 = _goertzel_batch(chunks, FREQ_1, SAMPLE_RATE)
-    is_f0 = e0 > e1 * 1.5
-
-    # Find first run of `required` consecutive True values
+    required = max(1, int(PREAMBLE_SECS * SYMBOL_RATE * 0.6))
     run = 0
-    run_start = 0
-    for i in range(n_symbols):
-        if is_f0[i]:
+    start = 0
+    for i in range(n_syms):
+        if is_pre[i]:
             if run == 0:
-                run_start = i
+                start = i
             run += 1
             if run >= required:
-                return run_start * spb
+                return start * sps
         else:
             run = 0
     return -1
+
+
+def decode_audio(pcm_s16: bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
+    """Recover the payload from raw s16le mono PCM, or b"" if not found."""
+    sig = np.frombuffer(pcm_s16, dtype=np.int16).astype(np.float32) / 32768.0
+    if sample_rate != SAMPLE_RATE:
+        ratio = SAMPLE_RATE / sample_rate
+        idx = np.clip((np.arange(int(len(sig) * ratio)) / ratio).astype(int),
+                      0, len(sig) - 1)
+        sig = sig[idx]
+
+    sps = SAMPLES_PER_SYMBOL
+    pre = _find_preamble(sig)
+    if pre < 0:
+        return b""
+
+    pos = pre + int((PREAMBLE_SECS + SILENCE_SECS) * SAMPLE_RATE)
+
+    sync_bits = _demod_bits(sig[pos:], len(SYNC_WORD) * 8)
+    if np.packbits(sync_bits).tobytes() != SYNC_WORD:
+        return b""
+    pos += _syms_for_bits(len(SYNC_WORD) * 8) * sps
+
+    len_bits = _demod_bits(sig[pos:], 64)
+    payload_length, rs_length = struct.unpack(
+        '<II', np.packbits(len_bits).tobytes())
+    pos += _syms_for_bits(64) * sps
+
+    if rs_length == 0 or rs_length > len(sig) // sps * BITS_PER_SYMBOL // 8:
+        return b""
+    if payload_length > rs_length:
+        return b""
+
+    rs_bits = _demod_bits(sig[pos:], rs_length * 8)
+    rs_bytes = np.packbits(rs_bits).tobytes()[:rs_length]
+    try:
+        return _rs_decode_audio(rs_bytes)[:payload_length]
+    except Exception:
+        return b""
