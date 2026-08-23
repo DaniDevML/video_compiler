@@ -7,6 +7,7 @@ import threading
 import uuid
 import zipfile
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 # Point numba's JIT cache to a writable directory so the compiled kernels
 # survive across Python restarts (avoids the ~30s cold-start penalty).
@@ -77,50 +78,101 @@ def _job_error(job_id: str, msg: str):
 # Background workers
 # ---------------------------------------------------------------------------
 
+def _keep_on_failure(job_id: str, paths: list) -> None:
+    """Preserve encoded videos when the upload is what failed.
+
+    Encoding a large archive costs minutes, and the usual upload failures --
+    a daily quota, a dropped connection -- are worth retrying against rather
+    than re-encoding from scratch.
+    """
+    for i, src in enumerate(paths):
+        if not src or not os.path.exists(src):
+            continue
+        kept = os.path.join(SCRATCH, f'encoded_{job_id[:8]}_{i}.mp4')
+        try:
+            shutil.move(src, kept)
+            if os.path.exists(src + '.sidecar'):
+                shutil.move(src + '.sidecar', kept + '.sidecar')
+            _job_progress(job_id, f'Upload failed; the encoded video was kept '
+                                  f'at {kept}')
+        except OSError:
+            pass
+
+
 def _encode_worker(job_id: str, file_paths: list, title: str):
     progress = lambda m: _job_progress(job_id, m)
-    tmp_video = None
-    encoded_ok = False
+    videos: list = []
+    uploaded = False
     try:
-        from video_encoder import encode_files_to_video
+        import shards
+        from video_encoder import create_archive
         from youtube_api import upload_video
 
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tf:
-            tmp_video = tf.name  # close the handle before ffmpeg writes to it
-        encode_files_to_video(file_paths, tmp_video, progress=progress)
-        encoded_ok = True
+        progress('Creating archive...')
+        archive = create_archive(file_paths)
+        n = shards.suggest_shard_count(len(archive))
+        progress(f'Archive: {len(archive):,} bytes -> '
+                 f'{n} video{"s" if n > 1 else ""}.')
 
-        _video_id, url = upload_video(tmp_video, title=title, progress=progress)
-        _job_done(job_id, url=url, video_id=_video_id)
+        out_dir = tempfile.mkdtemp(prefix='enc_')
+        jobs = shards.encode_bytes_to_shards(
+            archive, out_dir, n_shards=n,
+            progress=progress if n == 1 else lambda m: None,
+            max_workers=n)
+        videos = [j['path'] for j in jobs]
+        if n > 1:
+            progress(f'Encoded {n} videos, '
+                     f'{sum(j["bytes"] for j in jobs):,} bytes total.')
+
+        # Uploads run concurrently: YouTube throttles each stream rather than
+        # the connection, so several at once measured 2.14x the throughput of
+        # one. With a single video this is just a direct call.
+        def send(j):
+            part = (f' ({j["index"] + 1}/{n})' if n > 1 else '')
+            vid, url = upload_video(
+                j['path'],
+                title=title if n == 1 else f'{title} [{j["index"] + 1}/{n}]',
+                progress=(lambda m: progress(f'{m}{part}')) if n == 1 else None)
+            progress(f'Uploaded video {j["index"] + 1} of {n}.')
+            return dict(index=j['index'], url=url, video_id=vid)
+
+        if n == 1:
+            results = [send(jobs[0])]
+        else:
+            progress(f'Uploading {n} videos in parallel...')
+            with ThreadPoolExecutor(max_workers=n) as ex:
+                results = list(ex.map(send, jobs))
+        uploaded = True
+        results.sort(key=lambda r: r['index'])
+
+        urls = [r['url'] for r in results]
+        if n > 1:
+            progress('All videos uploaded. Every URL below is needed to '
+                     'decode -- keep them together.')
+        _job_done(job_id, url=urls[0], urls=urls,
+                  video_id=results[0]['video_id'],
+                  video_ids=[r['video_id'] for r in results],
+                  shards=n)
 
     except Exception as exc:
-        # Keep the encoded video if the upload is what failed. Encoding a large
-        # archive costs minutes, and the usual upload failures -- a daily quota,
-        # a dropped connection -- are worth retrying against rather than
-        # re-encoding from scratch.
-        if encoded_ok and tmp_video and os.path.exists(tmp_video):
-            kept = os.path.join(SCRATCH, f'encoded_{job_id[:8]}.mp4')
-            try:
-                shutil.move(tmp_video, kept)
-                if os.path.exists(tmp_video + '.sidecar'):
-                    shutil.move(tmp_video + '.sidecar', kept + '.sidecar')
-                tmp_video = None
-                _job_progress(job_id, f'Upload failed; the encoded video was '
-                                      f'kept at {kept}')
-            except OSError:
-                pass
+        if not uploaded:
+            _keep_on_failure(job_id, videos)
+            videos = []
         _job_error(job_id, str(exc))
     finally:
         # Cleanup must never raise. An exception here runs after the result has
         # been queued but before the thread returns, and it killed the worker
         # silently -- the browser then waited on a status stream that would
         # never produce a result.
-        if tmp_video and os.path.exists(tmp_video):
-            try:
-                os.unlink(tmp_video)
-            except OSError as e:
-                _job_progress(job_id, f'Note: could not remove the temporary '
-                                      f'video ({e.__class__.__name__}).')
+        for v in videos:
+            for path in (v, v + '.sidecar'):
+                if path and os.path.exists(path):
+                    try:
+                        os.unlink(path)
+                    except OSError as e:
+                        _job_progress(job_id, f'Note: could not remove a '
+                                              f'temporary file '
+                                              f'({e.__class__.__name__}).')
         for fp in file_paths:
             try:
                 shutil.rmtree(fp) if os.path.isdir(fp) else os.unlink(fp)
@@ -128,21 +180,38 @@ def _encode_worker(job_id: str, file_paths: list, title: str):
                 pass
 
 
-def _decode_worker(job_id: str, youtube_url: str):
+def _decode_worker(job_id: str, urls: list):
     progress = lambda m: _job_progress(job_id, m)
-    tmp_video = None
+    tmp_dir = None
     try:
+        import shards
         from youtube_api import download_video, fetch_description
-        from video_decoder import decode_video_to_files
 
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tf:
-            tmp_video = tf.name  # close handle before yt-dlp writes to it
-        description = fetch_description(youtube_url)
-        tmp_video = download_video(youtube_url, tmp_video, progress=progress)
+        n = len(urls)
+        tmp_dir = tempfile.mkdtemp(prefix='dec_')
 
-        out_dir = tempfile.mkdtemp()
-        names = decode_video_to_files(tmp_video, out_dir, progress=progress,
-                                      description=description)
+        def fetch(i):
+            path = os.path.join(tmp_dir, f'v{i}.mp4')
+            desc = fetch_description(urls[i])
+            download_video(urls[i], path, progress=None)
+            progress(f'Downloaded video {i + 1} of {n}.')
+            return i, path, desc
+
+        if n == 1:
+            progress('Downloading video...')
+            got = [fetch(0)]
+        else:
+            progress(f'Downloading {n} videos in parallel...')
+            with ThreadPoolExecutor(max_workers=n) as ex:
+                got = sorted(ex.map(fetch, range(n)))
+
+        paths = [p for _, p, _ in got]
+        descs = [d for _, _, d in got]
+
+        out_dir = tempfile.mkdtemp(prefix='out_')
+        names = shards.decode_shards_to_files(
+            paths, out_dir, descs, progress=progress,
+            max_workers=min(n, 4))
 
         # Zip everything up for browser download
         zip_path = out_dir + '_decoded.zip'
@@ -153,18 +222,14 @@ def _decode_worker(job_id: str, youtube_url: str):
                     arc_name = os.path.relpath(abs_path, out_dir)
                     zf.write(abs_path, arc_name)
 
-        _job_done(job_id, zip_path=zip_path, names=names)
+        _job_done(job_id, names=names, zip_path=zip_path)
 
     except Exception as exc:
         _job_error(job_id, str(exc))
     finally:
-        if tmp_video and os.path.exists(tmp_video):
-            os.unlink(tmp_video)
+        if tmp_dir and os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
 
 @app.route('/')
 def index():
@@ -205,17 +270,39 @@ def encode():
     return jsonify({'job_id': job_id})
 
 
+def _parse_urls(data: dict) -> list:
+    """Pull a list of video URLs out of a decode request.
+
+    Accepts a list under "urls", or a single "url" that may itself hold several
+    separated by newlines or commas -- pasting a block of URLs is the natural
+    thing to do once an archive spans several videos.
+    """
+    raw = data.get('urls')
+    if isinstance(raw, str):
+        raw = [raw]
+    if not raw:
+        raw = [data.get('url') or '']
+
+    out = []
+    for entry in raw:
+        for part in str(entry).replace(',', chr(10)).split(chr(10)):
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
 @app.route('/decode', methods=['POST'])
 def decode():
     data = request.get_json(silent=True) or {}
-    url = (data.get('url') or '').strip()
-    if not url:
+    urls = _parse_urls(data)
+    if not urls:
         return jsonify({'error': 'No YouTube URL provided'}), 400
 
     job_id = _new_job()
     t = threading.Thread(
         target=_decode_worker,
-        args=(job_id, url),
+        args=(job_id, urls),
         daemon=True,
     )
     t.start()

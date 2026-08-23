@@ -354,12 +354,15 @@
   <div class="log-box" id="enc-log"></div>
 
   <div class="result-box" id="enc-result">
-    <div class="url-display">
-      <a id="enc-url-link" href="#" target="_blank"></a>
-      <button class="copy-btn" onclick="copyUrl('enc-url-link', this)">Copy</button>
+    <div id="enc-urls"></div>
+    <button class="copy-btn" id="enc-copy-all" onclick="copyAllUrls(this)"
+            style="margin-top:10px;">Copy all</button>
+    <div class="info-pill" id="enc-shard-note" style="display:none;color:var(--yellow);border-color:rgba(251,191,36,0.25);background:rgba(251,191,36,0.08);">
+      This archive is split across several videos. <strong>All of them are
+      needed to decode</strong> — keep every URL together.
     </div>
     <div class="info-pill">
-      Video is unlisted — share the URL to allow decoding later.
+      Videos are unlisted — share the URLs to allow decoding later.
     </div>
     <div class="info-pill" style="color:var(--yellow);border-color:rgba(251,191,36,0.25);background:rgba(251,191,36,0.08);">
       YouTube may take a few minutes to process the video before it can be decoded.
@@ -373,7 +376,10 @@
 
   <div class="card">
     <label class="field-label">YouTube URL or Video ID</label>
-    <input type="text" id="dec-url" placeholder="https://www.youtube.com/watch?v=..." oninput="onUrlInput()">
+    <textarea id="dec-url" rows="3" oninput="onUrlInput()"
+      placeholder="https://www.youtube.com/watch?v=...&#10;&#10;If the archive was split across several videos, paste every URL — one per line."
+      style="width:100%;resize:vertical;font-family:inherit;font-size:inherit;"></textarea>
+    <div class="info-pill" id="dec-count" style="display:none;"></div>
   </div>
 
   <button class="btn btn-primary" id="dec-btn" disabled onclick="startDecode()">
@@ -582,14 +588,45 @@ async function startEncode() {
   }
 }
 
+let lastEncodeUrls = [];
+
 function onEncodeDone(data) {
   setEncBusy(false);
-  if (data.url) {
-    const link = document.getElementById('enc-url-link');
-    link.href = data.url;
-    link.textContent = data.url;
-    document.getElementById('enc-result').classList.add('visible');
-  }
+  const urls = data.urls && data.urls.length ? data.urls : (data.url ? [data.url] : []);
+  if (!urls.length) return;
+  lastEncodeUrls = urls;
+
+  const box = document.getElementById('enc-urls');
+  box.innerHTML = '';
+  urls.forEach((u, i) => {
+    const row = document.createElement('div');
+    row.className = 'url-display';
+    if (urls.length > 1) {
+      const tag = document.createElement('span');
+      tag.textContent = `${i + 1}/${urls.length}`;
+      tag.style.cssText = 'opacity:.6;margin-right:8px;font-variant-numeric:tabular-nums;';
+      row.appendChild(tag);
+    }
+    const a = document.createElement('a');
+    a.href = u; a.target = '_blank'; a.textContent = u;
+    row.appendChild(a);
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.textContent = 'Copy';
+    btn.onclick = () => copyText(u, btn);
+    row.appendChild(btn);
+    box.appendChild(row);
+  });
+
+  document.getElementById('enc-copy-all').style.display =
+    urls.length > 1 ? '' : 'none';
+  document.getElementById('enc-shard-note').style.display =
+    urls.length > 1 ? '' : 'none';
+  document.getElementById('enc-result').classList.add('visible');
+}
+
+function copyAllUrls(btn) {
+  copyText(lastEncodeUrls.join(String.fromCharCode(10)), btn, 'Copy all');
 }
 
 function setEncBusy(busy) {
@@ -600,14 +637,26 @@ function setEncBusy(busy) {
 }
 
 // ─────────────────────────── Decode ──────────────────────────
+function decodeUrls() {
+  return document.getElementById('dec-url').value
+    .split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+}
+
 function onUrlInput() {
-  const val = document.getElementById('dec-url').value.trim();
-  document.getElementById('dec-btn').disabled = !val;
+  const urls = decodeUrls();
+  document.getElementById('dec-btn').disabled = !urls.length;
+  const note = document.getElementById('dec-count');
+  if (urls.length > 1) {
+    note.textContent = `${urls.length} videos — they will be downloaded and decoded in parallel.`;
+    note.style.display = '';
+  } else {
+    note.style.display = 'none';
+  }
 }
 
 async function startDecode() {
-  const url = document.getElementById('dec-url').value.trim();
-  if (!url) return;
+  const urls = decodeUrls();
+  if (!urls.length) return;
 
   document.getElementById('dec-btn').disabled = true;
   document.getElementById('dec-result').classList.remove('visible');
@@ -618,7 +667,7 @@ async function startDecode() {
     const res = await fetch('/decode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ urls }),
     });
     const { job_id, error } = await res.json();
     if (error) throw new Error(error);
@@ -683,6 +732,20 @@ function makeLogger(boxId) {
     box.appendChild(line);
     box.scrollTop = box.scrollHeight;
   };
+}
+
+function copyText(text, btn, restore) {
+  if (!text) return;
+  const label = restore || 'Copy';
+  const flash = () => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = label, 1500);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(flash).catch(() => fallbackCopy(text, flash));
+  } else {
+    fallbackCopy(text, flash);
+  }
 }
 
 function copyUrl(linkId, btn) {

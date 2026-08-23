@@ -125,8 +125,10 @@ def post_encode(file_path, title):
         return json.loads(r.read())
 
 
-def post_decode(url):
-    data = json.dumps({'url': url}).encode()
+def post_decode(urls):
+    if isinstance(urls, str):
+        urls = [urls]
+    data = json.dumps({'urls': urls}).encode()
     req = urllib.request.Request(f'{BASE}/decode', data=data, method='POST',
                                  headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=300) as r:
@@ -181,17 +183,24 @@ def main(mb=8.0, keep=False):
         t0 = time.perf_counter()
         done = stream_job(r['job_id'])
         encode_s = time.perf_counter() - t0
-        url = done.get('url')
-        log(f'encode+upload finished in {encode_s:.1f}s -> {url}')
+        urls = done.get('urls') or ([done['url']] if done.get('url') else [])
+        log(f'encode+upload finished in {encode_s:.1f}s -> '
+            f'{len(urls)} video(s)')
+        for u in urls:
+            log(f'  {u}')
 
-        log('waiting for the 1080p rendition before decoding...')
+        log('waiting for the 1080p rendition on every video...')
         sys.path.insert(0, HERE)
         from bench_youtube import wait_for_1080p
         from youtube_api import extract_video_id
-        proc_s = wait_for_1080p(extract_video_id(url))
+        t0 = time.perf_counter()
+        import concurrent.futures as _f
+        with _f.ThreadPoolExecutor(max_workers=len(urls)) as ex:
+            list(ex.map(lambda u: wait_for_1080p(extract_video_id(u)), urls))
+        proc_s = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        d = post_decode(url)
+        d = post_decode(urls)
         if 'error' in d:
             raise RuntimeError(f'/decode rejected: {d["error"]}')
         done2 = stream_job(d['job_id'])

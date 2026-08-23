@@ -97,6 +97,28 @@ def max_bytes_per_video(profile=None) -> int:
     return int(MAX_FRAMES_PER_VIDEO * p.bytes * vc.CHUNK_IN / 255)
 
 
+# How many videos to split into when the caller does not say.
+#
+# Two separate reasons to shard, with different thresholds. Above
+# max_bytes_per_video it is mandatory -- one video cannot hold the archive.
+# Below that it is an optimisation: concurrent uploads measured 2.14x the
+# throughput of a single stream, which is worth having on a large archive but
+# not on a small one, where the extra videos cost more in clutter (and in
+# YouTube's daily upload allowance) than the seconds they save.
+SHARD_MIN_BYTES   = 64 * 1024 * 1024     # below this, one video
+SHARD_TARGET_BYTES = 256 * 1024 * 1024   # aim for roughly this much per shard
+SHARD_MAX          = 4                   # more streams stop helping
+
+
+def suggest_shard_count(archive_size: int, profile=None) -> int:
+    """A sensible number of videos for an archive of this size."""
+    required = max(1, -(-archive_size // max_bytes_per_video(profile)))
+    if archive_size < SHARD_MIN_BYTES:
+        return required
+    wanted = round(archive_size / SHARD_TARGET_BYTES) or 1
+    return max(required, min(SHARD_MAX, max(2, wanted)))
+
+
 def plan_shards(archive_size: int, n_shards: int = None,
                 profile=None) -> list:
     """Contiguous (offset, length) slices covering the archive."""
