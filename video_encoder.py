@@ -95,12 +95,17 @@ def rs_encode(data: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 
 # Quantiser used for the upload. The blocks are flat by construction, so a
-# coarse quantiser reproduces them exactly -- measured clean (zero bit errors)
-# through our own decoder up to qp46, and the post-YouTube error rate is flat
-# across the whole qp18..qp46 range because YouTube discards our bitstream and
-# re-encodes regardless. Uploading at qp44 rather than the v4 default of qp18
-# therefore costs nothing and halves the bytes on the wire.
-# See bench/bench_upload_preset.py and bench/sweep_upload_qp.py.
+# coarse quantiser reproduces them exactly through our own decoder, and raising
+# it from the v4 default of qp18 to qp44 cuts the uploaded bytes substantially
+# at no cost to recovery.
+#
+# It does NOT keep paying: measured against real YouTube, qp51 -- which is
+# still clean through our own decoder at 2.75x expansion -- loses the data,
+# with 22 of 39,031 blocks beyond repair (video PWEOo6HEmDY). Uploading a
+# coarser file degrades the source YouTube re-encodes from, and past roughly
+# qp47 that starts to matter. qp44 is verified end to end through the real
+# service at 8, 64, 256 and 1024 MB.
+# See bench/sweep_upload_qp_v5.py and bench/bench_youtube.py.
 UPLOAD_QP = 44
 
 

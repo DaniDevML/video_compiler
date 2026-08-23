@@ -68,6 +68,10 @@ _t.Thread(target=_rs_warmup, daemon=True).start()
 _RS_WORKERS = min(12, (os.cpu_count() or 4))
 _RS_THREAD_MIN_CHUNKS = 64
 
+# Filled in by the last rs_decode() call: chunks seen, chunks repaired, total
+# symbols repaired, chunks beyond repair.
+LAST_CORRECTION_STATS: dict = {}
+
 
 def _rs_decode_parallel(rs, arr: np.ndarray) -> bytes:
     """Reed-Solomon decode split across threads.
@@ -124,6 +128,16 @@ def rs_decode(data: bytes, original_size: int, nroots: int = NROOTS) -> bytes:
             # matters because correction runs over the whole archive whenever
             # even one error is present -- which is always, off YouTube.
             fixed, status = rs_decode_batch_c(arr, nroots)
+            # Telemetry: how hard the error correction had to work. A useful
+            # health signal for a channel we do not control -- a video that
+            # decodes fine but needed 30% of its blocks repaired is close to
+            # the edge, and that is invisible from success alone.
+            LAST_CORRECTION_STATS.update(
+                chunks=int(len(status)),
+                repaired=int(np.count_nonzero(status > 0)),
+                symbols=int(status[status > 0].sum()) if len(status) else 0,
+                failed=int(np.count_nonzero(status < 0)),
+            )
             n_bad = int(np.count_nonzero(status < 0))
             if n_bad:
                 raise RuntimeError(

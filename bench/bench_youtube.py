@@ -204,6 +204,7 @@ def run(size_mb):
         result['decode_s'] = time.perf_counter() - t0
         got = sha256_file(os.path.join(out, 'payload.bin'))
         result['recovered'] = (got == want)
+        result['correction'] = dict(vd.LAST_CORRECTION_STATS)
         log(f'decoded in {result["decode_s"]:.1f}s -> '
             f'{"BYTES IDENTICAL" if result["recovered"] else "DATA MISMATCH"}')
         result['status'] = 'ok' if result['recovered'] else 'corrupt'
@@ -237,10 +238,11 @@ def decode_only(video_id, size_mb):
     size_bytes = int(size_mb * 1024 * 1024)
     work = tempfile.mkdtemp(prefix='ytdec_')
     try:
-        print(f'
-{"="*68}
-== decode-only: {size_mb} MB from {url}
-{"="*68}')
+        bar = '=' * 68
+        print('')
+        print(bar)
+        print(f'== decode-only: {size_mb} MB from {url}')
+        print(bar)
         log('regenerating the expected payload...')
         want = make_payload(os.path.join(work, 'expected.bin'), size_bytes)
 
@@ -266,6 +268,11 @@ def decode_only(video_id, size_mb):
         log(f'decoded in {dt:.1f}s -> '
             f'{"BYTES IDENTICAL" if ok else "DATA MISMATCH"}')
         log(f'decode throughput: {size_bytes/dt/1e6:.2f} MB/s')
+        st = dict(vd.LAST_CORRECTION_STATS)
+        if st.get('chunks'):
+            log(f'error correction: {st["repaired"]:,} of {st["chunks"]:,} '
+                f'blocks repaired ({st["repaired"]/st["chunks"]*100:.2f}%), '
+                f'{st["symbols"]:,} symbols')
         return ok
     finally:
         shutil.rmtree(work, ignore_errors=True)

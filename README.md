@@ -120,7 +120,7 @@ video_compiler/
 | Error correction | Reed-Solomon RS(255, 215) — 40 parity bytes/chunk |
 | Header redundancy | 5 in-frame copies + audio track + video description |
 | Audio channel | Binary FSK at 2,100 bps, 3/6 kHz tones (Goertzel demodulation) |
-| Upload quantiser | constqp 44 (see *Upload size* below) |
+| Upload quantiser | constqp 44 (see *the quantiser cliff* below) |
 | Video encoder | H.264 via NVENC / QSV / AMF / libx264 (auto-detected) |
 
 ---
@@ -174,43 +174,53 @@ is the only measurement that actually proves the format works.
 
 | stage | 8 MB payload |
 |---|---|
-| encode | 1.4 s → 25.28 MB video (3.16x) |
-| upload | 17.7 s (12.0 Mbit/s) |
+| encode | 1.4 s → 26.5 MB video (3.16x) |
+| upload | 18.2 s (11.6 Mbit/s) |
 | YouTube processing to 1080p | 24 s |
-| download | 3.8 s (45.3 Mbit/s) — YouTube served 20.47 MB |
-| decode + error correction | 37.4 s |
+| download | 5.0 s — YouTube served 20.6 MB |
+| decode + error correction | 1.5 s |
 | **result** | **bytes identical** |
 
-### Scaling
+### Scaling, to 1 GB
 
 | payload | video | upload | processing | download | decode | result |
 |---|---|---|---|---|---|---|
-| 8 MB | 25.3 MB | 17.7 s @ 12.0 Mbit/s | 24 s | 3.8 s @ 45 Mbit/s | 37.4 s | identical |
-| 64 MB | 202 MB | 108 s @ 15.7 Mbit/s | 50 s | 8.5 s @ 156 Mbit/s | 352.7 s | identical |
-| 256 MB | 808 MB | 369 s @ 18.4 Mbit/s | 91 s | 30.6 s @ 172 Mbit/s | 1252 s | identical |
+| 8 MB | 26.5 MB | 18.2 s @ 11.6 Mbit/s | 24 s | 5.0 s | **1.5 s** | identical |
+| 64 MB | 202 MB | 108 s @ 15.7 Mbit/s | 50 s | 8.5 s | 352.7 s* | identical |
+| 256 MB | 808 MB | 369 s @ 18.4 Mbit/s | 91 s | 30.6 s | **38.8 s** | identical |
+| **1 GB** | **3.38 GB** | **1441 s @ 18.8 Mbit/s** | 246 s | 149 s | **156.5 s** | **identical** |
 
-Everything scales linearly except the upload rate, which improves as the
-transfer gets long enough to reach full speed. Two observations:
+\* the 64 MB decode predates the native Reed-Solomon decoder. Re-measured on
+the same 256 MB video, decode went from **1252 s to 38.8 s — 32x faster**.
 
-**Decode dominates at scale, and it is all error correction.** At roughly 5 s
-per payload MB, a 256 MB archive spends 21 minutes in Reed-Solomon. The fast
-path is a parity strip plus a CRC check; a single error anywhere forces a full
-correction pass over the whole archive, and off YouTube there are always a few.
+A 1 GB archive becomes an 11-minute 1080p video. Note that puts a ceiling on a
+single video: YouTube caps unverified accounts at 15 minutes, which at this
+profile is about 1.7 GB.
 
-**YouTube returns less than it was given** — 626 MB back from an 808 MB upload.
-It re-encodes everything, which is exactly why the upload quantiser is nearly
-free to raise, and why a format has to be validated against the service rather
+**YouTube returns less than it was given** — 2.44 GB back from a 3.38 GB
+upload. It re-encodes everything, which is why the upload quantiser can be
+raised at all, and why a format has to be validated against the service rather
 than against our own encoder.
 
-Two things to note. YouTube returns a *smaller* file than was uploaded
-(20.47 MB against 25.28 MB) — it re-encodes everything, which is why the upload
-quantiser is nearly free to raise. And decode takes far longer here than in the
-local benchmark (37.4 s against 1.2 s) because real errors are present: the
-fast path is a parity strip plus CRC, and any error at all forces a full
-Reed-Solomon correction pass over the whole archive.
+**How hard error correction works.** The decoder records it: on the 8 MB round
+trip, 5,353 of 39,031 blocks needed repair (13.71%), averaging 1.28 corrected
+symbols each against a per-block capacity of 20. Healthy, but the tail matters
+— see the quantiser note below.
 
-The same script run against the v4 format failed at the last step, with the
-recovered data not matching after error correction.
+### The upload quantiser has a cliff
+
+Raising the quantiser shrinks the upload for free, until abruptly it does not.
+Through our own decoder every setting up to qp51 round-trips perfectly. Through
+real YouTube:
+
+| upload | expansion | our decoder | real YouTube |
+|---|---|---|---|
+| qp 44 | 3.16x | clean | **clean** (verified at 8/64/256/1024 MB) |
+| qp 51 | 2.75x | clean | **fails** — 22 of 39,031 blocks beyond repair |
+
+Uploading a coarser file degrades the source YouTube re-encodes *from*. The
+15% saving at qp51 is not worth the failure, so qp44 ships. This is the clearest
+illustration of why the local benchmarks cannot settle a format question.
 
 ## Where the gains came from
 
@@ -275,19 +285,28 @@ to disk each time. Three fixes:
   size sets how long ffmpeg sits blocked on a full pipe. 158 fps at 4 frames
   per batch against 62 at 32 and 34 at 64.
 
-### Reed-Solomon — 4.6x
+### Reed-Solomon — 55x decode, 3x encode
 
-`bench/bench_rs.py`. Parity output is verified byte-identical to the v4 path.
+`bench/bench_rs.py`, `bench/test_rs_native.py`. `native/rs.c` implements the
+same code galois does — table-driven GF(2^8), syndromes, Berlekamp-Massey,
+Chien search, Forney — parallelised across chunks.
 
-| variant | throughput |
-|---|---|
-| v4 (widens payload to int64 first) | 11.2 MB/s |
-| uint8 straight through | 11.7 MB/s |
-| **uint8 + 12 threads** | **51.2 MB/s** |
+| operation | galois | native | |
+|---|---|---|---|
+| decode | 0.8 MB/s | **44.2 MB/s** | 55x |
+| encode | 52 MB/s | **153 MB/s** | 3x |
 
-galois dispatches to numba-compiled ufuncs that release the GIL, so splitting
-the chunk matrix across threads genuinely parallelises. Correction is per-chunk,
-so splitting cannot change the result.
+This is the single largest win in the project, because decode is where the
+time actually went. Off YouTube the payload always carries some errors, so the
+cheap path (strip parity, check CRC) never fires on a large archive and every
+block goes through correction. Measured on the same 256 MB video: **1252 s
+before, 38.8 s after**.
+
+Matching galois bit-for-bit matters, since existing videos were encoded with
+it. `bench/test_rs_native.py` checks agreement at every error count from zero
+to the correction limit, past it, and on burst patterns, and confirms an
+uncorrectable block is *reported* rather than silently returned as wrong bytes.
+galois remains the fallback when the C library is unavailable.
 
 ---
 
@@ -412,6 +431,7 @@ README.
 | Survives real YouTube | untested | untested | **no** (3.6e-02 BER) | **yes** (1.1e-05) |
 | Format chosen by | — | — | local encoder only | **real round trips** |
 | Pixel engine | NumPy | C single-thread | C single-thread | C threaded, packed bits |
+| Reed-Solomon | galois | galois | galois | **native C (55x decode)** |
 | Upload quantiser | qp 18 | qp 18 | qp 18 | **qp 44** |
 | Decode passes | 2 | 2 | 2 | **1 (streamed)** |
 | Audio channel | — | header (never read) | header (never read) | **2,100 bps, read as fallback** |
