@@ -17,6 +17,27 @@
 
 ---
 
+---
+
+## Branches
+
+| branch | contains |
+|---|---|
+| `dev` | the original v4 codec |
+| **`v5-max-throughput`** (this one) | the v5 format and the single-video pipeline |
+| `v6-parallel` | v5 plus sharding across parallel videos and the M-ary audio channel |
+
+v5 is the format and performance work: a frame format chosen from real YouTube
+round trips, a native Reed-Solomon codec, and a rebuilt decode path. Everything
+here uploads one video per archive.
+
+`v6-parallel` builds directly on this branch and adds nothing to the format —
+it splits an archive across several videos so the uploads can run concurrently,
+which is worth **2.14x** on upload throughput, the stage that dominates
+end-to-end time. If you want the fastest end-to-end path, use that branch.
+
+---
+
 ## How It Works
 
 ```
@@ -119,7 +140,7 @@ video_compiler/
 | FPS | 30 |
 | Error correction | Reed-Solomon RS(255, 215) — 40 parity bytes/chunk |
 | Header redundancy | 5 in-frame copies + audio track + video description |
-| Audio channel | Binary FSK at 2,100 bps, 3/6 kHz tones (Goertzel demodulation) |
+| Audio channel | Binary FSK at 2,100 bps, 3/6 kHz tones (4-FSK on `v6-parallel`) |
 | Upload quantiser | constqp 44 (see *the quantiser cliff* below) |
 | Video encoder | H.264 via NVENC / QSV / AMF / libx264 (auto-detected) |
 
