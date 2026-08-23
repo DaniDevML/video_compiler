@@ -36,5 +36,14 @@
     "decode_s": 11.913795499999651,
     "recovered": true,
     "status": "ok"
+  },
+  {
+    "size_mb": 1024.0,
+    "n_shards": 4,
+    "started": "2026-08-23 13:43:00",
+    "encode_s": 92.81933240000035,
+    "video_bytes": 3388594074,
+    "status": "error",
+    "error": "ResumableUploadError: <HttpError 400 when requesting None returned \"The user has exceeded the number of videos they may upload.\". Details: \"[{'message': 'The user has exceeded the number of videos they may upload.', 'domain': 'youtube.video', 'reason': 'uploadLimitExceeded'}]\">"
   }
 ]

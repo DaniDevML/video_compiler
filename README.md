@@ -39,6 +39,7 @@ Decoding reverses the pipeline: download → extract raw frames → decode pixel
 - **C native pixel engine**, multithreaded, operating directly on packed bits
 - **Hardware encoder auto-detection** — NVIDIA NVENC, Intel QSV, AMD AMF, or software libx264
 - **Three independent header channels** — pixels, FSK audio, and the video description
+- **Sharding across videos** — archives larger than one video split automatically, and parallel uploads run 2.1x faster than a single stream
 - **Selectable density** — a `Profile` sets block size and bits per block independently per plane; the header records both, so any profile decodes
 - **Backward compatible** — decodes v4 (`VIDCMPR4`), v3 (`VIDCMPR3`), and legacy v2 (`VIDCMPR2`) videos
 - **Web UI** — drag-and-drop files, real-time progress via SSE, one-click decode
@@ -119,7 +120,8 @@ video_compiler/
 | FPS | 30 |
 | Error correction | Reed-Solomon RS(255, 215) — 40 parity bytes/chunk |
 | Header redundancy | 5 in-frame copies + audio track + video description |
-| Audio channel | Binary FSK at 2,100 bps, 3/6 kHz tones (Goertzel demodulation) |
+| Audio channel | 4-FSK at 3,150 sym/s = 6,300 bps (652 payload B/s) |
+| Max per video | ~1.27 GB (YouTube 15-min cap); larger archives shard automatically |
 | Upload quantiser | constqp 44 (see *the quantiser cliff* below) |
 | Video encoder | H.264 via NVENC / QSV / AMF / libx264 (auto-detected) |
 
@@ -221,6 +223,34 @@ real YouTube:
 Uploading a coarser file degrades the source YouTube re-encodes *from*. The
 15% saving at qp51 is not worth the failure, so qp44 ships. This is the clearest
 illustration of why the local benchmarks cannot settle a format question.
+
+## The 1 GB sharded run: partly blocked
+
+The single-video 1 GB round trip completed and is the verified result above.
+The **sharded** 1 GB run is not finished: encoding completed (92.8 s for four
+shards, 3.39 GB of video), then YouTube refused further uploads with
+`uploadLimitExceeded` — a daily per-account video count limit, unrelated to
+size, reached after 13 test uploads that day. It resets in about 24 hours.
+
+What that leaves measured, and what it does not:
+
+| | status |
+|---|---|
+| 1 GB single video, full round trip | **measured**, bytes identical |
+| 1 GB sharded, encode stage | **measured** — 92.8 s, 3.39 GB across 4 shards |
+| 96 MB sharded, full round trip | **measured**, bytes identical |
+| 3-way parallel upload throughput | **measured** — 39.9 Mbit/s aggregate |
+| 1 GB sharded, full round trip | **not run** — blocked on the upload limit |
+
+Combining the measured parts *projects* roughly 17-18 minutes for the sharded
+1 GB round trip against the 35 minutes measured for the single video, but that
+is a projection from component measurements, not an observed result, and it
+assumes four concurrent streams aggregate like the three that were measured.
+To settle it once the limit resets:
+
+```bash
+python bench/bench_shards_upload.py 1024 4
+```
 
 ## Where the gains came from
 
@@ -402,6 +432,90 @@ Their real value is redundancy and speed of decode:
 
 ---
 
+# v6: parallel shards
+
+An archive can be split across several videos: built once, cut into contiguous
+slices, each slice encoded as an independent video carrying a manifest (the
+whole-archive length and CRC, plus this shard's offset) in its description.
+
+```python
+import shards
+jobs = shards.encode_files_to_shards(['big.iso'], 'out/', n_shards=4)
+shards.decode_shards_to_files(paths, 'recovered/', descriptions)
+```
+
+Shards may be supplied in any order — the manifest puts them back. A missing
+shard, or one belonging to a different upload, is rejected rather than silently
+producing a corrupt archive.
+
+## Why it is worth it: parallel upload
+
+Upload dominates end-to-end time at any real size, and one HTTP stream does not
+saturate the link. Measured against the live service, three shards uploaded
+concurrently (`bench/bench_shards_upload.py`):
+
+| | throughput |
+|---|---|
+| one stream (measured on 256 MB and 1 GB uploads) | 18.6 Mbit/s |
+| **three concurrent streams, aggregate** | **39.9 Mbit/s** |
+| each individual stream | 13.4 Mbit/s |
+
+**2.14x.** Per-stream throughput drops, but the aggregate more than doubles —
+YouTube throttles each stream rather than the connection. Download parallelises
+too: 189.8 Mbit/s aggregate across three streams.
+
+A complete 96 MB sharded round trip: encode 10.9 s, upload 63.8 s, processing
+48 s, download 10.5 s, decode 11.9 s, bytes identical.
+
+## Why local parallelism barely helps
+
+Sharding the *compute* is much less dramatic (`bench/bench_shards.py`, 64 MB):
+
+| shards | encode | decode |
+|---|---|---|
+| 1 | 8.47 s | 7.83 s |
+| 2 | 6.87 s | 6.61 s |
+| 3 | **6.70 s** | 6.70 s |
+| 4 | 6.72 s | 7.02 s |
+
+It saturates at two or three: consumer NVENC caps concurrent sessions, and the
+pixel and Reed-Solomon stages already use every core, so extra shards just
+re-divide the same CPU. 1.26x encode, 1.18x decode — worth having, but the
+upload is where sharding actually pays.
+
+## The audio channel, now M-ary
+
+Each symbol is one of M tones carrying log2(M) bits. Three constraints
+interact: orthogonality needs tone spacing >= the symbol rate; AAC low-passes
+around 15 kHz, capping M * spacing; and AAC's transform smears very short
+symbols, putting a floor on symbol duration that has nothing to do with
+bandwidth.
+
+Those bound throughput at log2(M)/M * B, which peaks near M = 3 — so theory
+says M-ary FSK should barely beat binary. Sweeping every viable combination
+through a real AAC 128k round trip (`bench/sweep_audio_mary.py`) agrees:
+
+| | symbol rate | raw | payload |
+|---|---|---|---|
+| **4-FSK** (shipping) | 3,150/s | 6,300 bps | **652 B/s** |
+| 8-FSK | 1,575/s | 4,725 bps | 448 B/s |
+| 2-FSK | 4,410/s | 4,410 bps | 430 B/s |
+
+4-FSK at 3,150 sym/s is the bandwidth-limited optimum — one symbol rate higher
+pushes the top tone past AAC's cutoff. **2.9x the previous binary setting.**
+
+That sweep also surfaced a bug: sections were modulated as a single bit stream,
+so whenever `BITS_PER_SYMBOL` did not divide a section length the payload began
+mid-symbol while the decoder read it at a symbol offset. Every 8-FSK
+configuration failed, which looked exactly like a channel limit. Each section
+is now modulated separately.
+
+Scale, honestly: 652 B/s against the pixel channel's 1.68 MB/s is **0.04% of
+total capacity**. The audio channel's value is redundancy — it carries a backup
+header — not throughput.
+
+---
+
 # Tests
 
 ```bash
@@ -423,7 +537,7 @@ README.
 
 ## Version History
 
-| | v2 | v3 | v4 | v5 |
+| | v2 | v3 | v4 | v5/v6 |
 |---|---|---|---|---|
 | Colour space | Grayscale | YUV 4:2:0 | YUV 4:2:0 | YUV 4:2:0 |
 | Bits per block | 1 | 2 Y / 1 C | 3 Y / 2 C | **2 Y / 3 C** |
@@ -435,7 +549,9 @@ README.
 | Upload quantiser | qp 18 | qp 18 | qp 18 | **qp 44** |
 | Decode passes | 2 | 2 | 2 | **1 (streamed)** |
 | Audio channel | — | header (never read) | header (never read) | **2,100 bps, read as fallback** |
-| Description channel | — | — | — | **header sidecar** |
+| Description channel | — | — | — | **header sidecar + shard manifest** |
+| Audio channel rate | — | 100 bps | 100 bps | **6,300 bps (4-FSK)** |
+| Multi-video sharding | — | — | — | **yes, parallel (2.1x upload)** |
 
 v5 carries 13% fewer bytes per frame than v4 and is the first version that
 actually round-trips through the service. `PROFILE_DENSE` carries 128,880 B per
