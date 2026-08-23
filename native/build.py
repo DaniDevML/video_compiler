@@ -15,6 +15,7 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC  = os.path.join(_HERE, 'frame_ops.c')
+_SRCS = [_SRC, os.path.join(_HERE, 'rs.c')]
 _OUT  = os.path.join(_HERE, 'frame_ops.dll' if sys.platform == 'win32' else 'frame_ops.so')
 
 
@@ -77,7 +78,6 @@ def build():
             msvc_lib = os.path.join(msvc_ver, 'lib', 'x64')
             cl_dir   = os.path.dirname(cl_path)
 
-            obj  = os.path.join(_HERE, 'frame_ops.obj')
             lib1 = os.path.join(msvc_lib, 'msvcrt.lib')
             lib2 = os.path.join(msvc_lib, 'vcruntime.lib')
 
@@ -101,14 +101,21 @@ def build():
             # directive matches the msvcrt.lib/vcruntime.lib pair linked below.
             # (/O2 can lower the hand-rolled fill loops to memset calls, so the
             # CRT import libraries genuinely are needed.)
-            ok, err = _run([cl_path, '/O2', '/MD', '/c', '/nologo', _SRC,
-                            f'/Fo:{obj}'], cwd=_HERE, env=env)
+            objs = []
+            ok = True
+            for src in _SRCS:
+                o = os.path.splitext(src)[0] + '.obj'
+                objs.append(o)
+                ok, err = _run([cl_path, '/O2', '/MD', '/c', '/nologo', src,
+                                f'/Fo:{o}'], cwd=_HERE, env=env)
+                if not ok:
+                    break
             if ok:
                 link = os.path.join(cl_dir, 'link.exe')
                 ok, err = _run([link, '/DLL', '/NOENTRY', '/nologo',
-                                f'/OUT:{_OUT}', obj, lib1, lib2],
+                                f'/OUT:{_OUT}', *objs, lib1, lib2],
                                cwd=_HERE, env=env)
-            for junk in [obj,
+            for junk in [*objs,
                          os.path.join(_HERE, 'frame_ops.exp'),
                          os.path.join(_HERE, 'frame_ops.lib')]:
                 if os.path.exists(junk):
@@ -130,7 +137,7 @@ def build():
                                  ('GCC', static),
                                  ('GCC (shared runtime)', [])]:
                 ok, err = _run([gcc, '-O3', '-march=native', '-shared', *extra,
-                                '-o', _OUT, _SRC])
+                                '-o', _OUT, *_SRCS])
                 if ok and os.path.exists(_OUT) and _loadable(_OUT):
                     print(f'[native] Built with {label} -> {_OUT}')
                     return True
@@ -144,7 +151,7 @@ def build():
                 continue
             for label, extra in [(f'{compiler} + OpenMP', ['-fopenmp']),
                                  (compiler, [])]:
-                ok, err = _run([exe, *base, *extra, '-o', _OUT, _SRC])
+                ok, err = _run([exe, *base, *extra, '-o', _OUT, *_SRCS])
                 if ok and os.path.exists(_OUT):
                     print(f'[native] Built with {label} -> {_OUT}')
                     return True

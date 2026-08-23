@@ -13,6 +13,7 @@ ROOT = os.path.dirname(HERE)
 
 TESTS = [
     ('native pixel engine',    'test_native.py'),
+    ('native Reed-Solomon',    'test_rs_native.py'),
     ('end-to-end pipeline',    'test_e2e.py'),
     ('description sidecar',    'test_sidecar.py'),
     ('audio channel',          'test_audio.py'),

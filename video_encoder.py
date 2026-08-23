@@ -1,8 +1,8 @@
 """
-Video encoder (v4): files → H.264/AAC video
+Video encoder (v5): files → H.264/AAC video
 
-v4: 3-bpp Y plane (8 gray levels) + 2-bpp Cb/Cr planes (4 gray levels)
-    → 64,200 bytes/frame (1.6× over v3's 40,140)
+The frame format lives in video_codec.Profile; see DEFAULT_PROFILE there for
+the geometry and the measurements behind it.
 """
 
 import io
@@ -34,6 +34,11 @@ from video_codec import (
 )
 import audio_codec as _ac
 
+try:
+    from native import RS_AVAILABLE, rs_encode_batch_c
+except ImportError:
+    RS_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Reed-Solomon encode  (galois – numba-JIT vectorised)
 # ---------------------------------------------------------------------------
@@ -57,17 +62,22 @@ _RS_THREAD_MIN_CHUNKS = 64
 
 
 def rs_encode(data: bytes) -> bytes:
-    """Reed-Solomon encode, parallelised across chunks.
+    """Reed-Solomon encode.
 
-    Two changes from the v4 path, both verified to produce byte-identical
-    parity: the payload is handed to galois as uint8 rather than being widened
-    to int64 first, and the chunk matrix is split across threads. galois
-    dispatches to numba-compiled ufuncs that release the GIL, so the threads
-    genuinely run in parallel.
+    Prefers the native encoder. The galois path below is the fallback for
+    builds without the C library: it hands the payload over as uint8 rather
+    than widening it to int64 first, and splits the chunk matrix across
+    threads (galois runs numba ufuncs that release the GIL). All three paths
+    are verified to produce byte-identical parity.
     """
     pad    = (-len(data)) % CHUNK_IN
     padded = data + b'\x00' * pad
     chunks = np.frombuffer(padded, dtype=np.uint8).reshape(-1, CHUNK_IN)
+
+    if RS_AVAILABLE:
+        # Native encoder: verified byte-identical to galois in
+        # bench/test_rs_native.py, and about 3x faster.
+        return rs_encode_batch_c(chunks, NROOTS).tobytes()
 
     if len(chunks) < _RS_THREAD_MIN_CHUNKS or _RS_WORKERS < 2:
         return np.asarray(_RS.encode(chunks.view(_GF)), dtype=np.uint8).tobytes()

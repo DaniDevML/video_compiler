@@ -122,6 +122,28 @@ def _load():
             lib.native_threads.restype  = ctypes.c_int
             lib.native_threads.argtypes = []
 
+        if hasattr(lib, 'rs_decode_batch'):
+            lib.rs_decode_batch.restype  = ctypes.c_int
+            lib.rs_decode_batch.argtypes = [
+                _c_uint8_p,                      # data (corrected in place)
+                ctypes.POINTER(ctypes.c_int),    # status_out
+                ctypes.c_int,                    # n_chunks
+                ctypes.c_int,                    # n (codeword length)
+                ctypes.c_int,                    # nroots
+                ctypes.c_int,                    # n_threads
+            ]
+            lib.rs_encode_batch.restype  = ctypes.c_int
+            lib.rs_encode_batch.argtypes = [
+                _c_uint8_p,                      # msg
+                _c_uint8_p,                      # out (codewords)
+                ctypes.c_int,                    # n_chunks
+                ctypes.c_int,                    # n
+                ctypes.c_int,                    # nroots
+                ctypes.c_int,                    # n_threads
+            ]
+            lib.rs_max_roots.restype  = ctypes.c_int
+            lib.rs_max_roots.argtypes = []
+
         _lib = lib
     except Exception as e:
         print(f'[native] Warning: could not load {_LIB_NAME}: {e}')
@@ -130,6 +152,7 @@ def _load():
 _load()
 NATIVE_AVAILABLE = _lib is not None
 PACKED_AVAILABLE = NATIVE_AVAILABLE and hasattr(_lib, 'encode_plane_packed')
+RS_AVAILABLE     = NATIVE_AVAILABLE and hasattr(_lib, 'rs_decode_batch')
 
 # Threads the C library will use internally. >1 means it was built with
 # OpenMP, in which case callers must not add a second layer of parallelism.
@@ -243,6 +266,38 @@ def decode_plane_packed_c(frames: np.ndarray, out: np.ndarray,
         block_size, blocks_x, blocks_y_data, sync_rows, bpp, margin,
         NATIVE_THREADS,
     )
+
+
+# ─── Reed-Solomon decode ──────────────────────────────────────────────────────
+
+def rs_decode_batch_c(chunks: np.ndarray, nroots: int):
+    """Correct a (n_chunks, n) uint8 array of codewords in place.
+
+    Returns (corrected_array, status) where status[i] is the number of symbols
+    repaired in chunk i, or -1 if that chunk was beyond the code's capability.
+    The input is not modified; a corrected copy is returned.
+    """
+    arr = np.ascontiguousarray(chunks, dtype=np.uint8).copy()
+    n_chunks, n = arr.shape
+    status = np.empty(n_chunks, dtype=np.int32)
+    _lib.rs_decode_batch(
+        _ptr(arr), status.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        n_chunks, n, nroots, NATIVE_THREADS,
+    )
+    return arr, status
+
+
+def rs_encode_batch_c(msg: np.ndarray, nroots: int) -> np.ndarray:
+    """Systematic encode of a (n_chunks, k) uint8 array.
+
+    Returns (n_chunks, k + nroots) codewords: message first, then parity.
+    """
+    src = np.ascontiguousarray(msg, dtype=np.uint8)
+    n_chunks, k = src.shape
+    out = np.empty((n_chunks, k + nroots), dtype=np.uint8)
+    _lib.rs_encode_batch(_ptr(src), _ptr(out), n_chunks, k + nroots,
+                         nroots, NATIVE_THREADS)
+    return out
 
 
 def check_sync_batch_c(frames: np.ndarray,

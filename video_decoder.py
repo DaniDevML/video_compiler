@@ -35,6 +35,11 @@ from video_codec import (
     NATIVE_AVAILABLE, PACKED_AVAILABLE, NATIVE_THREADS,
 )
 
+try:
+    from native import RS_AVAILABLE, rs_decode_batch_c
+except ImportError:
+    RS_AVAILABLE = False
+
 _CANDIDATE_BLOCK_SIZES = [4, 16]
 
 # Profiles the header frame might be written in. v5 always uses PROFILE_HEADER;
@@ -113,15 +118,31 @@ def rs_decode(data: bytes, original_size: int, nroots: int = NROOTS) -> bytes:
     if n_full > 0:
         arr = np.frombuffer(data[:n_full * chunk_size], dtype=np.uint8) \
                 .reshape(-1, chunk_size)
-        try:
-            rs = _galois.ReedSolomon(255, chunk_in) if nroots != NROOTS else _RS
-            parts.append(_rs_decode_parallel(rs, arr))
-        except Exception:
-            raise RuntimeError(
-                "Couldn't repair the data errors in this video. "
-                'YouTube may have re-compressed it too aggressively, '
-                'or this might be the wrong video URL.'
-            )
+        if RS_AVAILABLE:
+            # The native decoder implements the same code as galois (verified
+            # bit-for-bit in bench/test_rs_native.py) around 55x faster, which
+            # matters because correction runs over the whole archive whenever
+            # even one error is present -- which is always, off YouTube.
+            fixed, status = rs_decode_batch_c(arr, nroots)
+            n_bad = int(np.count_nonzero(status < 0))
+            if n_bad:
+                raise RuntimeError(
+                    f"Couldn't repair the data errors in this video "
+                    f'({n_bad:,} of {n_full:,} blocks were too damaged to '
+                    'correct). YouTube may have re-compressed it too '
+                    'aggressively, or this might be the wrong video URL.'
+                )
+            parts.append(fixed[:, :chunk_in].tobytes())
+        else:
+            try:
+                rs = _galois.ReedSolomon(255, chunk_in) if nroots != NROOTS else _RS
+                parts.append(_rs_decode_parallel(rs, arr))
+            except Exception:
+                raise RuntimeError(
+                    "Couldn't repair the data errors in this video. "
+                    'YouTube may have re-compressed it too aggressively, '
+                    'or this might be the wrong video URL.'
+                )
 
     if remainder > 0:
         last = data[n_full * chunk_size:]

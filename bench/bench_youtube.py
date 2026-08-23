@@ -226,6 +226,51 @@ def run(size_mb):
     return result
 
 
+def decode_only(video_id, size_mb):
+    """Re-measure the decode of a video already on YouTube.
+
+    Uploading a multi-gigabyte test again just to time the decode would be
+    wasteful, and the payload is generated from a fixed seed, so the expected
+    hash can simply be recomputed.
+    """
+    url = f'https://www.youtube.com/watch?v={video_id}'
+    size_bytes = int(size_mb * 1024 * 1024)
+    work = tempfile.mkdtemp(prefix='ytdec_')
+    try:
+        print(f'
+{"="*68}
+== decode-only: {size_mb} MB from {url}
+{"="*68}')
+        log('regenerating the expected payload...')
+        want = make_payload(os.path.join(work, 'expected.bin'), size_bytes)
+
+        description = fetch_description(url)
+        log(f'description sidecar present: '
+            f'{bool(vc.decode_sidecar(description))}')
+
+        dl = os.path.join(work, 'dl.mp4')
+        t0 = time.perf_counter()
+        download_video(url, dl, progress=None)
+        dt_dl = time.perf_counter() - t0
+        dsize = os.path.getsize(dl)
+        log(f'downloaded {human(dsize)} in {dt_dl:.1f}s '
+            f'({dsize*8/dt_dl/1e6:.1f} Mbit/s)')
+
+        out = os.path.join(work, 'out')
+        t0 = time.perf_counter()
+        vd.decode_video_to_files(dl, out, progress=None,
+                                 description=description)
+        dt = time.perf_counter() - t0
+        got = sha256_file(os.path.join(out, 'payload.bin'))
+        ok = got == want
+        log(f'decoded in {dt:.1f}s -> '
+            f'{"BYTES IDENTICAL" if ok else "DATA MISMATCH"}')
+        log(f'decode throughput: {size_bytes/dt/1e6:.2f} MB/s')
+        return ok
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main(sizes):
     print('Videos are uploaded UNLISTED and stay on your channel until deleted.')
     print(f'Scratch directory: {SCRATCH}  ({human(free_bytes(SCRATCH))} free)')
@@ -240,5 +285,7 @@ def main(sizes):
 
 
 if __name__ == '__main__':
-    args = [float(a) for a in sys.argv[1:]] or [8.0]
-    sys.exit(main(args))
+    argv = sys.argv[1:]
+    if argv and argv[0] == '--decode-only':
+        sys.exit(0 if decode_only(argv[1], float(argv[2])) else 1)
+    sys.exit(main([float(a) for a in argv] or [8.0]))
