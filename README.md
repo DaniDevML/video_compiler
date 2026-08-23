@@ -7,6 +7,23 @@
   </p>
 </p>
 
+> [!IMPORTANT]
+> **Correction.** The line above is not true of this branch. Real upload and
+> download round trips through YouTube show this format loses data: the luma
+> plane comes back at a 3.6e-02 bit error rate, far past what the Reed-Solomon
+> code can repair. It had only ever been validated against its own encoder,
+> which reproduces the blocks exactly and so proves nothing about the service.
+>
+> The cause is one parameter — 3 bits per block on the **luma** plane. Chroma
+> came back bit-perfect at every density tested, so the format was being careful
+> with the plane that needed no care.
+>
+> Fixed on [`v5-max-throughput`](../../tree/v5-max-throughput), where the format
+> is chosen from real round trips and a 1 GB payload recovers byte-identical.
+> [`v6-parallel`](../../tree/v6-parallel) adds sharding across concurrent
+> uploads on top of that.
+
+
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/codec-H.264%20YUV%204%3A2%3A0-green" alt="H.264 YUV 4:2:0">
