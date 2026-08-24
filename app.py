@@ -247,15 +247,23 @@ def encode():
 
     title = request.form.get('title', 'Data Archive').strip() or 'Data Archive'
 
-    # Save uploaded files preserving relative paths
-    tmp_dir = tempfile.mkdtemp()
+    # Save uploaded files preserving relative paths.
+    #
+    # The traversal guard below compares normalised paths on both sides. It
+    # used to normalise only `dest`, which meant the comparison depended on
+    # how the scratch directory happened to be spelled: a VIDCOMPILER_DATA
+    # containing forward slashes on Windows produced a normalised `dest` that
+    # could not match the unnormalised prefix, and every upload was rejected
+    # as a traversal attempt. Comparing like with like -- and requiring a
+    # separator, so /tmp/abc cannot pass for /tmp/abcdef -- fixes both the
+    # false positive and the weak prefix test.
+    tmp_dir = os.path.normpath(os.path.abspath(tempfile.mkdtemp()))
     top_level_paths = set()
 
     for f in files:
         rel = f.filename.replace('\\', '/')
         dest = os.path.normpath(os.path.join(tmp_dir, rel))
-        # Guard against path traversal
-        if not dest.startswith(tmp_dir):
+        if os.path.commonpath([tmp_dir, dest]) != tmp_dir or dest == tmp_dir:
             return jsonify({'error': 'Invalid file path'}), 400
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         f.save(dest)
