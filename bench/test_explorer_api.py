@@ -178,6 +178,22 @@ check('upload into a missing folder is a 404',
                   data={'parent': '4242', 'file': (open(__file__, 'rb'), 'x.py')},
                   content_type='multipart/form-data').status_code == 404)
 
+print('\nPath traversal on the codec route')
+# The guard here compared a normalised path against an unnormalised prefix,
+# so whether it worked depended on how the scratch path happened to be
+# spelled -- with forward slashes on Windows it rejected every upload.
+for bad in ('../escape.txt', '..\\escape.txt', '/abs.txt', 'a/../../b.txt'):
+    r = client.post('/encode',
+                    data={'files': (open(__file__, 'rb'), bad)},
+                    content_type='multipart/form-data')
+    check(f'{bad!r} is refused', r.status_code == 400)
+
+r = client.post('/encode',
+                data={'files': (open(__file__, 'rb'), 'nested/dir/ok.py')},
+                content_type='multipart/form-data')
+check('a legitimate nested path is accepted',
+      r.status_code == 200 and 'job_id' in r.get_json())
+
 shutil.rmtree(_tmp, ignore_errors=True)
 
 print()
