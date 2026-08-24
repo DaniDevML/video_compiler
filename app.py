@@ -96,89 +96,114 @@ def _keep_on_failure(job_id: str, videos: list) -> None:
             pass
 
 
+def _upload_payload(payload: bytes, title: str, progress, videos: list) -> dict:
+    """Encode a payload into videos, upload them, and collect the links.
+
+    Shared by the codec page and the file explorer -- the pipelined
+    encode/upload below is the part worth not having twice. `videos` is the
+    caller's list, appended to as each file appears, so a failed upload can
+    keep the encoded videos rather than throwing minutes of work away.
+    """
+    import shards
+    import youtube_api as yt
+
+    n = shards.suggest_shard_count(len(payload))
+    progress(f'Payload: {len(payload):,} bytes -> '
+             f'{n} video{"s" if n > 1 else ""}.')
+
+    out_dir = tempfile.mkdtemp(prefix='enc_')
+
+    def enc_progress(msg):
+        # Frame counters from several concurrent encodes are noise; the
+        # milestones around them are worth showing.
+        if n > 1 and 'frame ' in msg:
+            return
+        progress(msg)
+
+    def send(job):
+        vid, url = yt.upload_video(
+            job['path'],
+            title=title if n == 1 else f'{title} [{job["index"] + 1}/{n}]',
+            progress=progress if n == 1 else None)
+        progress(f'Uploaded video {job["index"] + 1} of {n}.')
+        return dict(index=job['index'], url=url, video_id=vid)
+
+    if n == 1:
+        jobs = shards.encode_bytes_to_shards(
+            payload, out_dir, n_shards=1, progress=enc_progress,
+            max_workers=1)
+        videos.append(jobs[0]['path'])
+        results = [send(jobs[0])]
+    else:
+        # Upload each shard the moment it finishes encoding, rather than
+        # waiting for every encode to finish first. Uploading dominates,
+        # so starting the first one ~25 s in instead of ~95 s in takes
+        # that time off the total outright.
+        progress(f'Encoding and uploading {n} videos in parallel...')
+        with ThreadPoolExecutor(max_workers=n) as up_pool:
+            pending = []
+            for job in shards.iter_encoded_shards(
+                    payload, out_dir, n_shards=n, progress=enc_progress,
+                    max_workers=min(n, shards.encode_workers())):
+                videos.append(job['path'])
+                progress(f'Encoded video {job["index"] + 1} of {n}; '
+                         f'upload started.')
+                pending.append(up_pool.submit(send, job))
+            results = [f.result() for f in pending]
+
+    # Measured before cleanup: how much was actually pushed to YouTube, which
+    # is the number that tells you what the expansion cost you.
+    stored = 0
+    for v in videos:
+        try:
+            stored += os.path.getsize(v)
+        except OSError:
+            pass
+
+    results.sort(key=lambda r: r['index'])
+    urls = [r['url'] for r in results]
+    video_ids = [r['video_id'] for r in results]
+
+    # A single link beats a list of links the user must not lose. The
+    # playlist also records the order, which is what the decoder needs.
+    playlist = None
+    if n > 1:
+        try:
+            pid = yt.create_playlist(
+                title,
+                'Encoded data archive split across several videos. '
+                'Paste this playlist link into VidCompiler to decode.',
+                progress=progress)
+            for i, vid in enumerate(video_ids):
+                yt.add_to_playlist(pid, vid, position=i)
+            playlist = yt.playlist_url(pid)
+            progress('Playlist created. This one link is all you need.')
+        except Exception as exc:
+            progress(f'Could not create a playlist ({exc.__class__.__name__}). '
+                     'Every video URL below is needed to decode - keep '
+                     'them together.')
+
+    return dict(urls=urls, video_ids=video_ids, playlist=playlist,
+                shards=n, stored_size=stored)
+
+
 def _encode_worker(job_id: str, file_paths: list, title: str):
     progress = lambda m: _job_progress(job_id, m)
     videos: list = []
     uploaded = False
     try:
-        import shards
         from video_encoder import create_archive
-        import youtube_api as yt
 
         progress('Creating archive...')
         archive = create_archive(file_paths)
-        n = shards.suggest_shard_count(len(archive))
-        progress(f'Archive: {len(archive):,} bytes -> '
-                 f'{n} video{"s" if n > 1 else ""}.')
 
-        out_dir = tempfile.mkdtemp(prefix='enc_')
-
-        def enc_progress(msg):
-            # Frame counters from several concurrent encodes are noise; the
-            # milestones around them are worth showing.
-            if n > 1 and 'frame ' in msg:
-                return
-            progress(msg)
-
-        def send(job):
-            vid, url = yt.upload_video(
-                job['path'],
-                title=title if n == 1 else f'{title} [{job["index"] + 1}/{n}]',
-                progress=progress if n == 1 else None)
-            progress(f'Uploaded video {job["index"] + 1} of {n}.')
-            return dict(index=job['index'], url=url, video_id=vid)
-
-        if n == 1:
-            jobs = shards.encode_bytes_to_shards(
-                archive, out_dir, n_shards=1, progress=enc_progress,
-                max_workers=1)
-            videos = [j['path'] for j in jobs]
-            results = [send(jobs[0])]
-        else:
-            # Upload each shard the moment it finishes encoding, rather than
-            # waiting for every encode to finish first. Uploading dominates,
-            # so starting the first one ~25 s in instead of ~95 s in takes
-            # that time off the total outright.
-            progress(f'Encoding and uploading {n} videos in parallel...')
-            results = []
-            with ThreadPoolExecutor(max_workers=n) as up_pool:
-                pending = []
-                for job in shards.iter_encoded_shards(
-                        archive, out_dir, n_shards=n, progress=enc_progress,
-                        max_workers=min(n, shards.encode_workers())):
-                    videos.append(job['path'])
-                    progress(f'Encoded video {job["index"] + 1} of {n}; '
-                             f'upload started.')
-                    pending.append(up_pool.submit(send, job))
-                results = [f.result() for f in pending]
-
+        out = _upload_payload(archive, title, progress, videos)
         uploaded = True
-        results.sort(key=lambda r: r['index'])
-        urls = [r['url'] for r in results]
-        video_ids = [r['video_id'] for r in results]
 
-        # A single link beats a list of links the user must not lose. The
-        # playlist also records the order, which is what the decoder needs.
-        playlist = None
-        if n > 1:
-            try:
-                pid = yt.create_playlist(
-                    title,
-                    'Encoded data archive split across several videos. '
-                    'Paste this playlist link into VidCompiler to decode.',
-                    progress=progress)
-                for i, vid in enumerate(video_ids):
-                    yt.add_to_playlist(pid, vid, position=i)
-                playlist = yt.playlist_url(pid)
-                progress('Playlist created. This one link is all you need.')
-            except Exception as exc:
-                progress(f'Could not create a playlist ({exc.__class__.__name__}). '
-                         'Every video URL below is needed to decode - keep '
-                         'them together.')
-
-        _job_done(job_id, url=playlist or urls[0], urls=urls,
-                  playlist=playlist, video_id=video_ids[0],
-                  video_ids=video_ids, shards=n)
+        _job_done(job_id, url=out['playlist'] or out['urls'][0],
+                  urls=out['urls'], playlist=out['playlist'],
+                  video_id=out['video_ids'][0], video_ids=out['video_ids'],
+                  shards=out['shards'])
 
     except Exception as exc:
         if not uploaded:
@@ -264,6 +289,12 @@ def _decode_worker(job_id: str, urls: list):
 
 @app.route('/')
 def index():
+    return send_from_directory(paths.resource('static'), 'explorer.html')
+
+
+@app.route('/codec')
+def codec_tool():
+    """The raw encode/decode tool, for working with links directly."""
     return send_from_directory(paths.resource('static'), 'index.html')
 
 
@@ -428,6 +459,374 @@ def upload_creds():
     with open(dest, 'w') as out:
         json.dump(data, out)
     return jsonify({'ok': True})
+
+
+# ---------------------------------------------------------------------------
+# File explorer
+#
+# The illusion is that these files are stored here. They are not: every route
+# below moves rows in a SQLite index, and the bytes live on YouTube. The two
+# workers are the only places that touch real data, and both are transient.
+# ---------------------------------------------------------------------------
+
+import mimetypes                                                    # noqa: E402
+
+import crypto_box                                                   # noqa: E402
+import filecache                                                    # noqa: E402
+import library                                                      # noqa: E402
+
+
+def _guess_mime(name: str) -> str:
+    return mimetypes.guess_type(name)[0] or 'application/octet-stream'
+
+
+def _fs_upload_worker(job_id: str, tmp_dir: str, src: str, name: str,
+                      parent_id, passphrase: str):
+    progress = lambda m: _job_progress(job_id, m)
+    videos: list = []
+    uploaded = False
+    try:
+        import hashlib
+
+        from video_encoder import create_archive
+
+        size = os.path.getsize(src)
+
+        progress('Hashing...')
+        digest = hashlib.sha256()
+        with open(src, 'rb') as f:
+            for block in iter(lambda: f.read(1 << 20), b''):
+                digest.update(block)
+        sha = digest.hexdigest()
+
+        progress('Creating archive...')
+        payload = create_archive([src])
+
+        verify_salt = ''
+        verify = ''
+        if passphrase:
+            payload = crypto_box.encrypt(payload, passphrase, progress=progress)
+            # Reuse the ciphertext's own salt for the stored verifier. It is
+            # public -- it sits in the header inside the video -- so storing it
+            # locally gives away nothing that the link does not.
+            salt = crypto_box.header_info(payload)['salt']
+            verify_salt = salt.hex()
+            verify = crypto_box.verifier(passphrase, salt)
+
+        out = _upload_payload(payload, name, progress, videos)
+        uploaded = True
+
+        entry = library.add_file(
+            parent_id, name, size=size, mime=_guess_mime(name), sha256=sha,
+            encrypted=bool(passphrase), verify_salt=verify_salt,
+            verifier=verify, url=out['playlist'] or out['urls'][0],
+            playlist=out['playlist'] or '', urls=out['urls'],
+            video_ids=out['video_ids'], shards=out['shards'],
+            stored_size=out['stored_size'])
+
+        progress('Saved to your library.')
+        _job_done(job_id, entry=entry)
+
+    except Exception as exc:
+        if not uploaded:
+            _keep_on_failure(job_id, videos)
+            videos = []
+        _job_error(job_id, str(exc))
+    finally:
+        for v in videos:
+            for leftover in (v, v + '.sidecar'):
+                if leftover and os.path.exists(leftover):
+                    try:
+                        os.unlink(leftover)
+                    except OSError:
+                        pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _fs_fetch_worker(job_id: str, entry: dict, passphrase: str):
+    """Pull a file back from YouTube into the local cache.
+
+    This is the expensive direction -- a download, a full decode, error
+    correction and a decryption -- which is exactly why the result is cached
+    rather than recomputed for every preview.
+    """
+    progress = lambda m: _job_progress(job_id, m)
+    tmp_dir = None
+    out_dir = None
+    try:
+        import shards
+        import youtube_api as yt
+        from youtube_api import download_video, fetch_description
+
+        urls = list(entry['urls']) or [entry['url']]
+        if len(urls) == 1 and yt.is_playlist_url(urls[0]):
+            urls = yt.expand_playlist(urls[0], progress=progress)
+
+        n = len(urls)
+        tmp_dir = tempfile.mkdtemp(prefix='fsget_')
+
+        def fetch(i):
+            path = os.path.join(tmp_dir, f'v{i}.mp4')
+            desc = fetch_description(urls[i])
+            download_video(urls[i], path, progress=None)
+            progress(f'Downloaded video {i + 1} of {n}.')
+            return i, path, desc
+
+        if n == 1:
+            progress('Downloading...')
+            got = [fetch(0)]
+        else:
+            progress(f'Downloading {n} videos in parallel...')
+            with ThreadPoolExecutor(max_workers=n) as ex:
+                got = sorted(ex.map(fetch, range(n)))
+
+        payload = shards.decode_shards_to_bytes(
+            [p for _, p, _ in got], [d for _, _, d in got],
+            progress=progress, max_workers=min(n, 4))
+
+        if crypto_box.is_encrypted(payload):
+            if not passphrase:
+                raise RuntimeError('This file is encrypted. A passphrase is '
+                                   'needed to open it.')
+            payload = crypto_box.decrypt(payload, passphrase, progress=progress)
+
+        import video_decoder as vd
+        out_dir = tempfile.mkdtemp(prefix='fsout_')
+        names = vd._extract_archive(payload, out_dir, progress)
+        del payload
+
+        # Each explorer upload is one file, so the archive holds one member.
+        # Walking rather than trusting `names` keeps this correct if a
+        # directory ever gets in here.
+        found = None
+        for root, _dirs, files in os.walk(out_dir):
+            for fname in files:
+                found = os.path.join(root, fname)
+                break
+            if found:
+                break
+        if not found:
+            raise RuntimeError(f'The archive decoded but held no file '
+                               f'({", ".join(names) or "empty"}).')
+
+        cached = filecache.put(entry['id'], entry['name'], found)
+        progress('Ready.')
+        _job_done(job_id, entry_id=entry['id'],
+                  size=os.path.getsize(cached), cached=True)
+
+    except crypto_box.WrongPassphrase as exc:
+        _job_error(job_id, str(exc))
+    except Exception as exc:
+        _job_error(job_id, str(exc))
+    finally:
+        for d in (tmp_dir, out_dir):
+            if d and os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+
+
+def _fs_entry_or_404(entry_id):
+    try:
+        entry = library.get(int(entry_id))
+    except (TypeError, ValueError):
+        return None
+    return entry
+
+
+@app.route('/api/fs/list')
+def fs_list():
+    parent = request.args.get('parent', type=int) or None
+    term = (request.args.get('q') or '').strip()
+    if term:
+        return jsonify({'entries': library.search(term), 'trail': [],
+                        'parent': None, 'query': term})
+    if parent is not None and not library.get(parent):
+        return jsonify({'error': 'No such folder'}), 404
+    return jsonify({'entries': library.list_dir(parent),
+                    'trail': library.breadcrumbs(parent),
+                    'parent': parent, 'query': ''})
+
+
+@app.route('/api/fs/stats')
+def fs_stats():
+    s = library.stats()
+    s['cache_bytes'] = filecache.size()
+    s['free_gb'] = round(scratch_free_gb(), 1)
+    return jsonify(s)
+
+
+@app.route('/api/fs/folders')
+def fs_folders():
+    """Every folder with its full path, for the "move to" picker."""
+    def walk(parent, prefix):
+        out = []
+        for e in library.list_dir(parent):
+            if e['kind'] != 'folder':
+                continue
+            path = f'{prefix}/{e["name"]}'
+            out.append({'id': e['id'], 'path': path})
+            out.extend(walk(e['id'], path))
+        return out
+
+    return jsonify({'folders': [{'id': 0, 'path': '/'}] + walk(None, '')})
+
+
+@app.route('/api/fs/folder', methods=['POST'])
+def fs_folder():
+    data = request.get_json(silent=True) or {}
+    try:
+        entry = library.mkdir(data.get('parent') or None, data.get('name', ''))
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({'entry': entry})
+
+
+@app.route('/api/fs/upload', methods=['POST'])
+def fs_upload():
+    f = request.files.get('file')
+    if not f or not f.filename:
+        return jsonify({'error': 'No file provided'}), 400
+
+    parent = request.form.get('parent', type=int) or None
+    if parent is not None and not library.get(parent):
+        return jsonify({'error': 'No such folder'}), 404
+
+    # The passphrase arrives, is used, and is discarded when the worker ends.
+    # It is never written to the index, the log, or the job record.
+    passphrase = request.form.get('passphrase', '')
+
+    name = os.path.basename(f.filename.replace('\\', '/')) or 'file'
+    tmp_dir = tempfile.mkdtemp(prefix='fsin_')
+    src = os.path.join(tmp_dir, name)
+    f.save(src)
+
+    job_id = _new_job()
+    threading.Thread(target=_fs_upload_worker,
+                     args=(job_id, tmp_dir, src, name, parent, passphrase),
+                     daemon=True).start()
+    return jsonify({'job_id': job_id})
+
+
+@app.route('/api/fs/fetch/<int:entry_id>', methods=['POST'])
+def fs_fetch(entry_id: int):
+    entry = _fs_entry_or_404(entry_id)
+    if not entry or entry['kind'] != 'file':
+        return jsonify({'error': 'No such file'}), 404
+
+    data = request.get_json(silent=True) or {}
+    passphrase = data.get('passphrase', '')
+
+    if entry['encrypted']:
+        if not passphrase:
+            return jsonify({'error': 'This file is encrypted.',
+                            'need_passphrase': True}), 401
+        # Check before spending several minutes on a download. Costs one
+        # scrypt derivation, which is the same work the real key needs.
+        if entry['verifier']:
+            salt = bytes.fromhex(entry['verify_salt'])
+            if crypto_box.verifier(passphrase, salt) != entry['verifier']:
+                return jsonify({'error': 'Wrong passphrase for this file.',
+                                'need_passphrase': True}), 401
+
+    cached = filecache.get(entry_id, entry['name'])
+    if cached and not data.get('force'):
+        return jsonify({'cached': True})
+
+    job_id = _new_job()
+    threading.Thread(target=_fs_fetch_worker,
+                     args=(job_id, entry, passphrase), daemon=True).start()
+    return jsonify({'job_id': job_id})
+
+
+def _serve_cached(entry: dict, as_attachment: bool):
+    cached = filecache.get(entry['id'], entry['name'])
+    if not cached:
+        return jsonify({'error': 'Not fetched yet', 'need_fetch': True}), 409
+    # conditional=True gives byte-range support, which is what lets a cached
+    # video or audio file scrub in the browser instead of restarting.
+    return send_file(cached, mimetype=entry['mime'] or None,
+                     as_attachment=as_attachment,
+                     download_name=entry['name'], conditional=True)
+
+
+@app.route('/api/fs/download/<int:entry_id>')
+def fs_download(entry_id: int):
+    entry = _fs_entry_or_404(entry_id)
+    if not entry or entry['kind'] != 'file':
+        return jsonify({'error': 'No such file'}), 404
+    return _serve_cached(entry, as_attachment=True)
+
+
+@app.route('/api/fs/preview/<int:entry_id>')
+def fs_preview(entry_id: int):
+    entry = _fs_entry_or_404(entry_id)
+    if not entry or entry['kind'] != 'file':
+        return jsonify({'error': 'No such file'}), 404
+    return _serve_cached(entry, as_attachment=False)
+
+
+@app.route('/api/fs/rename', methods=['POST'])
+def fs_rename():
+    data = request.get_json(silent=True) or {}
+    try:
+        entry = library.rename(int(data['id']), data.get('name', ''))
+    except KeyError:
+        return jsonify({'error': 'No such item'}), 404
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({'entry': entry})
+
+
+@app.route('/api/fs/move', methods=['POST'])
+def fs_move():
+    data = request.get_json(silent=True) or {}
+    try:
+        entry = library.move(int(data['id']), data.get('parent') or None)
+    except KeyError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({'entry': entry})
+
+
+@app.route('/api/fs/delete', methods=['POST'])
+def fs_delete():
+    """Remove from the library, and only on request from YouTube as well.
+
+    Dropping the index row is cheap and reversible: the videos stay unlisted
+    on the channel and the links come back in the response, so a mistake can
+    be undone by pasting them into the codec page. Deleting the videos cannot
+    be undone, so it happens only when explicitly asked for.
+    """
+    data = request.get_json(silent=True) or {}
+    also_remote = bool(data.get('delete_videos'))
+    try:
+        removed = library.delete(int(data['id']))
+    except KeyError:
+        return jsonify({'error': 'No such item'}), 404
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    for entry in removed:
+        filecache.drop(entry['id'], entry['name'])
+
+    links = [e['url'] for e in removed if e['url']]
+    errors = []
+    if also_remote:
+        import youtube_api as yt
+        for entry in removed:
+            for vid in entry['video_ids']:
+                try:
+                    yt.delete_video(vid)
+                except Exception as exc:
+                    errors.append(f'{vid}: {exc.__class__.__name__}')
+    return jsonify({'ok': True, 'removed': len(removed), 'links': links,
+                    'delete_errors': errors})
+
+
+@app.route('/api/fs/cache', methods=['DELETE'])
+def fs_cache_purge():
+    """Empty the local cache, including plaintext of encrypted files."""
+    return jsonify({'freed': filecache.purge()})
 
 
 def _startup_warmup():

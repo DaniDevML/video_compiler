@@ -37,13 +37,14 @@ datas += collect_data_files('imageio_ffmpeg', include_py_files=False)
 hiddenimports = [
     'paths', 'shards', 'video_codec', 'video_encoder', 'video_decoder',
     'audio_codec', 'youtube_api', 'app',
+    'crypto_box', 'filecache', 'library',
     'waitress',
     'engineio.async_drivers.threading',
 ]
 
 binaries = []
 for pkg in ('galois', 'numba', 'llvmlite', 'yt_dlp', 'google_auth_oauthlib',
-            'googleapiclient', 'imageio_ffmpeg'):
+            'googleapiclient', 'imageio_ffmpeg', 'cryptography'):
     try:
         d, b, h = collect_all(pkg)
         datas += d

@@ -1,9 +1,10 @@
 <p align="center">
   <h1 align="center">VidCompiler</h1>
   <p align="center">
-    Store any file inside a YouTube video — and recover it perfectly.
+    Cloud storage with no cloud storage bill — your files live inside
+    YouTube videos.
     <br />
-    Format verified by real upload/download round trips, not simulation.
+    Encrypted before upload, browsable as an ordinary file manager.
   </p>
 </p>
 
@@ -14,10 +15,11 @@
   <img src="https://img.shields.io/badge/pixel%20engine-C%20native-red" alt="C native">
   <img src="https://img.shields.io/badge/upload-2.14x%20parallel-0E7490" alt="Parallel upload">
   <img src="https://img.shields.io/badge/docker-portable-2496ED?logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/crypto-AES--256--GCM-16A34A" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey" alt="GPL-3.0 License">
 </p>
 
-**Contents** — [Branches](#branches) · [What each version can and cannot do](#what-each-version-can-and-cannot-do) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Usage](#usage) · [Technical specs](#technical-specs) · [Performance](#performance) · [The v5 format](#the-v5-format-and-why-v4-had-to-change) · [Parallel shards](#parallel-shards) · [v7: one link](#v7-one-link-not-many) · [Tests](#tests) · [License](#license)
+**Contents** — [Branches](#branches) · [What each version can and cannot do](#what-each-version-can-and-cannot-do) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Usage](#usage) · [Technical specs](#technical-specs) · [Performance](#performance) · [The v5 format](#the-v5-format-and-why-v4-had-to-change) · [Parallel shards](#parallel-shards) · [v7: one link](#v7-one-link-not-many) · [The file explorer](#the-file-explorer) · [Encryption](#encryption) · [Tests](#tests) · [License](#license)
 
 ---
 
@@ -30,8 +32,8 @@
 | [`optimization-v3`](../../tree/optimization-v3) | v4 | the density experiment — 3 bpp on luma. Measured against real YouTube, it loses data |
 | [`v5-max-throughput`](../../tree/v5-max-throughput) | v5 | the first format chosen from real round trips, plus a native Reed-Solomon codec |
 | [`v6-parallel`](../../tree/v6-parallel) | v5 | sharding across concurrently uploaded videos, and a Windows executable |
-| **`v7-playlists`** (this one) | **v5** | one playlist link per archive, a portable Docker image, faster archiving |
-| [`file_explorer`](../../tree/file_explorer) | v5 | a browsable file manager on top of v7, with encryption before upload |
+| [`v7-playlists`](../../tree/v7-playlists) | v5 | one playlist link per archive, a portable Docker image, faster archiving |
+| **`file_explorer`** (this one) | **v5** | a browsable file manager on top of v7, with encryption before upload |
 
 The frame format has not changed since v5 — a video encoded on
 `v5-max-throughput`, `v6-parallel`, `v7-playlists` or `file_explorer` decodes
@@ -39,23 +41,23 @@ on all four. What the later branches add is everything around the format.
 
 ## What each version can and cannot do
 
-The same table appears on every branch. This one is **`v7-playlists`**.
+The same table appears on every branch. This one is **`file_explorer`**.
 
 | | `dev`<br>v3 | `optimization-v3`<br>v4 | `v5-max-`<br>`throughput` | `v6-parallel` | `v7-playlists` | `file_explorer` |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
 | Data per frame | 40,140 B | 64,200 B | 56,100 B | 56,100 B | 56,100 B | 56,100 B |
-| Recovers a file that really went through YouTube | untested | **no** | yes | yes | **yes** | yes |
-| Verified byte-identical at 1 GB | no | no | yes | yes | **yes** | yes |
-| Threaded, packed-bit pixel engine | no | no | yes | yes | **yes** | yes |
-| Native C Reed-Solomon (32x decode) | no | no | yes | yes | **yes** | yes |
-| Header in audio *and* description | no | no | yes | yes | **yes** | yes |
-| Selectable density profiles | no | no | yes | yes | **yes** | yes |
-| Archives larger than one video | no | no | no | yes | **yes** | yes |
-| One link for a split archive | no | no | no | no | **yes** | yes |
-| Windows executable | no | no | no | yes | **yes** | yes |
-| Docker image | no | no | no | no | **yes** | yes |
-| Browsable file manager | no | no | no | no | no | yes |
-| Encryption before upload | no | no | no | no | no | yes |
+| Recovers a file that really went through YouTube | untested | **no** | yes | yes | yes | **yes** |
+| Verified byte-identical at 1 GB | no | no | yes | yes | yes | **yes** |
+| Threaded, packed-bit pixel engine | no | no | yes | yes | yes | **yes** |
+| Native C Reed-Solomon (32x decode) | no | no | yes | yes | yes | **yes** |
+| Header in audio *and* description | no | no | yes | yes | yes | **yes** |
+| Selectable density profiles | no | no | yes | yes | yes | **yes** |
+| Archives larger than one video | no | no | no | yes | yes | **yes** |
+| One link for a split archive | no | no | no | no | yes | **yes** |
+| Windows executable | no | no | no | yes | yes | **yes** |
+| Docker image | no | no | no | no | yes | **yes** |
+| Browsable file manager | no | no | no | no | no | **yes** |
+| Encryption before upload | no | no | no | no | no | **yes** |
 
 > "Verified byte-identical at 1 GB" means a single 1 GB video, uploaded to
 > YouTube and downloaded back. The **sharded** 1 GB path on `v6-parallel` and
@@ -63,41 +65,33 @@ The same table appears on every branch. This one is **`v7-playlists`**.
 
 ### What this branch can do
 
-- Everything [`v6-parallel`](../../tree/v6-parallel) does, with the same frame
-  format and the same interchangeable videos.
-- **Hand back one link instead of many.** A split archive is collected into an
-  unlisted YouTube playlist, which also records the order, and the decoder
-  takes that playlist link on its own.
-- **Run anywhere, from a Docker image** that deliberately does not depend on
-  CUDA, so it needs no host driver and no container runtime beyond Docker
-  itself. Built and verified: the image serves the page, reports `healthy`, and
-  passes the native, Reed-Solomon, shard and end-to-end suites inside the
-  container.
-- **Skip gzip when it cannot help**, which takes archiving of incompressible
-  input from 31.9 MB/s to **190.9 MB/s** — about 28 seconds off a gigabyte.
-- **Start uploading before encoding finishes.** Each shard uploads as soon as
-  it is encoded, so the first upload begins around 25 seconds in rather than 95.
+- Everything [`v7-playlists`](../../tree/v7-playlists) does — same format, same
+  sharding, same playlists, same Docker image.
+- **Present the whole thing as a file manager.** Folders, upload, preview,
+  download, rename, move, delete, search. It looks like ordinary cloud storage.
+- **Store no file content whatsoever.** The index holds names, sizes, types and
+  the YouTube link each file lives behind. Every byte is on YouTube; the local
+  database of a terabyte of files is a few hundred kilobytes.
+- **Encrypt before anything leaves the machine.** AES-256-GCM under a
+  passphrase, with scrypt key derivation, applied to the archive before it is
+  encoded into frames. What YouTube stores is ciphertext.
+- **Preview files in the browser** — images, text, PDF, audio, video — by
+  fetching and decoding on demand, with a local cache so the second look is
+  instant.
 
 ### What it cannot do
 
-- **Create a playlist with upload-only credentials.** Playlists need the
-  `youtube` scope rather than `youtube.upload`, so the first run after
-  upgrading asks for consent again. Where only the narrower grant exists, the
-  upload still succeeds and the individual links come back instead, with a
-  warning that all of them are needed. *Decoding* a playlist needs no
-  credentials at all — it reads the link with yt-dlp.
-- **Guarantee a large sharded upload.** Unchanged from v6, and unresolved:
-  the default profile spends ~14% of its blocks on repair even when healthy,
-  and one shard of a 1 GB run crossed the line. `PROFILE_ROBUST` is the
-  measured fix and is not yet the default. See *the error-correction margin*.
-- **Use your GPU inside the container.** Without `--gpus all` it encodes in
-  software, which uploads about **31% more bytes** for the same payload
-  (4.14x expansion against 3.16x). The recovered data is identical either way;
-  you pay in upload time.
-- **Beat YouTube's daily upload limit.** Large or repeated runs will hit
-  `uploadLimitExceeded`, which is a platform quota and is not worked around.
-- No file manager, no encryption — those are on
-  [`file_explorer`](../../tree/file_explorer).
+- **Recover an encrypted file if you lose the passphrase.** It is never stored,
+  never logged, and never sent anywhere. There is no reset.
+- **Preview instantly the first time.** A preview is a real YouTube download
+  plus a decode; a large file takes as long as a download takes. Cached
+  afterwards.
+- **Serve several users.** The index is per-installation and unauthenticated —
+  it assumes the localhost or private-network deployment the rest of the
+  project assumes. Do not expose it to the internet as-is.
+- Everything on v7's list still applies: the error-correction margin, the
+  playlist scope, the daily upload quota, and software encoding in the
+  container.
 
 ## How It Works
 
@@ -108,11 +102,12 @@ Files  ←  untar   ←  RS error correction ←  YUV pixel decoding ←  H.264 
 ```
 
 1. **Archive** — Input files are packed into a `.tar.gz` archive with CRC-32 integrity check.
-2. **Error Correction** — The archive is split into 215-byte chunks, each protected with 40 bytes of Reed-Solomon parity (RS(255, 215)).
-3. **Pixel Encoding** — Corrected data is written into YUV 4:2:0 frames: 2 bits per 4x4 block on the Y plane and 3 bits per 4x4 block on the Cb/Cr chroma planes. The split is deliberate and measured — see *The v5 format* below.
-4. **Video Encoding** — Frames are piped to ffmpeg as raw YUV and encoded to H.264 with hardware acceleration (NVENC / QSV / AMF) or software fallback (libx264).
-5. **Side channels** — A copy of the header goes into the audio track as FSK tones *and* into the video description, so the decoder can recover the archive parameters three independent ways.
-6. **Upload** — The video is uploaded to YouTube as unlisted via the Data API v3.
+2. **Encryption** *(optional)* — The archive is sealed with AES-256-GCM under a passphrase, before anything leaves the machine. See *Encryption* below.
+3. **Error Correction** — The archive is split into 215-byte chunks, each protected with 40 bytes of Reed-Solomon parity (RS(255, 215)).
+4. **Pixel Encoding** — Corrected data is written into YUV 4:2:0 frames: 2 bits per 4x4 block on the Y plane and 3 bits per 4x4 block on the Cb/Cr chroma planes. The split is deliberate and measured — see *The v5 format* below.
+5. **Video Encoding** — Frames are piped to ffmpeg as raw YUV and encoded to H.264 with hardware acceleration (NVENC / QSV / AMF) or software fallback (libx264).
+6. **Side channels** — A copy of the header goes into the audio track as FSK tones *and* into the video description, so the decoder can recover the archive parameters three independent ways.
+7. **Upload** — The video is uploaded to YouTube as unlisted via the Data API v3.
 
 Decoding reverses the pipeline: download → extract raw frames → decode pixels → Reed-Solomon correct → verify CRC → extract files.
 
@@ -125,6 +120,8 @@ Decoding reverses the pipeline: download → extract raw frames → decode pixel
 - **Selectable density** — a `Profile` sets block size and bits per block independently per plane; the header records both, so any profile decodes
 - **Backward compatible** — decodes v4 (`VIDCMPR4`), v3 (`VIDCMPR3`), and legacy v2 (`VIDCMPR2`) videos
 - **Single executable** — one double-click starts the server and opens the app; no Python, ffmpeg or compiler needed
+- **File manager** — folders, upload, preview, download, rename, move, search; the bytes are on YouTube, the index is a few hundred kilobytes
+- **Encryption before upload** — AES-256-GCM with scrypt key derivation, so YouTube holds neither your contents nor your filenames
 - **Web UI** — drag-and-drop files, real-time progress via SSE, one-click decode
 
 ## Requirements
@@ -212,14 +209,30 @@ python launcher.py
 
 ## Usage
 
-### Encode & Upload
+### The file manager (the default page)
+
+1. Drop a file anywhere on the page, or click **Upload file**.
+2. Tick **Encrypt this file** if you want it sealed, and set a passphrase.
+3. Watch it encode and upload. When it finishes, it appears in the listing —
+   what is stored on this machine is the name, size and YouTube link.
+4. Click a file to open it. The first open fetches and decodes it, which takes
+   as long as a download takes; after that it is cached and instant.
+
+Folders, rename, move and search are ordinary metadata operations — moving a
+gigabyte between folders is one `UPDATE`, not a copy.
+
+### The raw codec tool (`/codec`)
+
+Unchanged from `v7-playlists`, for working with links directly.
+
+#### Encode & Upload
 
 1. Drop any files or folders onto the drop zone.
 2. Optionally set a video title.
 3. Click **Encode & Upload to YouTube**.
 4. Copy the returned link. A split archive gives you a single playlist link that is all you need.
 
-### Decode
+#### Decode
 
 1. Switch to the **Decode from URL** tab.
 2. Paste the link. One playlist link is enough for a split archive; otherwise paste every video URL, one per line.
@@ -247,10 +260,15 @@ video_compiler/
 ├── docker-compose.yml  # docker compose up
 ├── paths.py            # Resource vs user-data paths, frozen or from source
 ├── shards.py           # Split an archive across parallel videos
+├── library.py          # The file explorer's index: names and links, no content
+├── crypto_box.py       # AES-256-GCM + scrypt, chunked and authenticated
+├── filecache.py        # LRU cache of files fetched back from YouTube
 ├── build_exe.py        # Build dist/VidCompiler.exe
 ├── vidcompiler.spec    # PyInstaller recipe
 ├── bench/              # Benchmarks and test suites (see below)
-└── static/index.html   # Single-page web UI
+└── static/
+    ├── explorer.html   # The file manager (served at /)
+    └── index.html      # The raw codec tool (served at /codec)
 ```
 
 ## Technical Specs
@@ -717,6 +735,136 @@ roughly 25 seconds in rather than 95.
 
 ---
 
+# The file explorer
+
+The rest of this project is a codec that hands you a URL. This branch puts a
+file manager in front of it, so the thing behaves like storage rather than
+like a tool.
+
+Upload a file and it appears in a listing with a name, a size and a date. Put
+it in a folder. Rename it. Search for it. Click it and it opens. None of which
+is remarkable — except that **none of those files are here.**
+
+## Nothing is stored locally
+
+The index is a SQLite table of rows like this one:
+
+| name | size | mime | encrypted | url | shards |
+|---|---|---|---|---|---|
+| `quarterly.pdf` | 5,000,000 | `application/pdf` | 0 | `https://youtu.be/...` | 1 |
+
+There is no content column and no blob on disk. A terabyte of files is a few
+hundred kilobytes of index — the seeded three-entry database in the test suite
+is 20 KB, and it does not grow with file size at all.
+
+Folders are equally imaginary: a `parent_id` on a row. Nothing on disk mirrors
+the tree, so moving a gigabyte between folders is one `UPDATE` statement.
+
+The footer says exactly what is going on, and does not round it in the
+project's favour:
+
+```
+2 files · 1 folder   9.0 MB stored on YouTube (31 MB uploaded)
+index: 20 KB on this machine   1 encrypted   cache: 336 B
+```
+
+"31 MB uploaded" against 9 MB of files is the expansion this codec costs. It
+is measured per file at upload time, not estimated.
+
+## Opening a file is a real download
+
+A preview is a YouTube download, a full frame decode, Reed-Solomon repair and
+a decryption. For a large file that is minutes, and no amount of interface
+polish changes it. Two things make it bearable:
+
+- **The result is cached.** The second open is instant. The cache is capped
+  (2 GB by default, `VIDCOMPILER_CACHE_MB`) and evicted least-recently-used.
+  Eviction is never data loss: every entry can be rebuilt from YouTube.
+- **Previews are streamed with byte ranges**, so a cached video or audio file
+  seeks in the browser instead of restarting.
+
+Images, video, audio, PDF and text render inline. Text is capped at 1 MB in
+the viewer — a browser asked to lay out a 200 MB log simply stops.
+
+> **The cache holds plaintext**, including of encrypted files. That is the
+> honest cost of being able to preview them at all. It is capped, evicted, and
+> there is a **clear** button next to the cache figure in the footer.
+
+## Deleting does not delete
+
+Removing a file drops the index row and leaves the video on YouTube, and the
+response hands back the links it just orphaned. That way a misclick costs you
+a paste into `/codec`, not the file.
+
+Deleting the videos themselves is a separate checkbox, labelled as
+irreversible, and it is the only thing in the codebase that calls
+`videos.delete`. Nothing invokes it implicitly.
+
+---
+
+# Encryption
+
+An unlisted YouTube video is **not private**. Anyone with the link can fetch
+it, YouTube keeps it, and the entire premise of this project is that the bytes
+are recoverable. Encryption is what turns "recoverable by anyone" into
+"recoverable by you".
+
+The archive is sealed **before** it becomes frames, so what YouTube holds is
+not your file contents, not the tar structure, and not your filenames. The
+test suite asserts that last point directly: a file called
+`confidential-filename.txt` containing the word `CONFIDENTIAL` produces
+uploaded bytes containing neither string.
+
+## The construction
+
+AES-256-GCM over 1 MiB chunks, keyed by scrypt (N=2^15, r=8, p=1 — about
+32 MB and a tenth of a second per file).
+
+Chunking is not an optimisation. GCM has a hard limit near 64 GB per
+(key, nonce) pair, and a single tag over a multi-gigabyte ciphertext would
+mean buffering unverified plaintext before it could be checked. Per-chunk tags
+let the decoder reject damage as it goes.
+
+But per-chunk tags open three holes that a single tag does not, so each chunk's
+associated data binds:
+
+| bound in | closes |
+|---|---|
+| the file header | swapping the KDF parameters for weaker ones |
+| the chunk index | reordering or duplicating chunks |
+| a final-chunk flag | truncating the stream |
+
+`bench/test_crypto.py` performs each of those attacks and requires a specific
+exception, not merely a failure — including splicing in a chunk from a
+*different file encrypted under the same passphrase*, which authenticates
+perfectly on its own and is rejected only by the index binding.
+
+## Checking the passphrase before the download
+
+A wrong passphrase discovered after a five-minute download is a bad
+experience, so the index stores a verifier.
+
+It runs the same scrypt as the real key and hashes the result with a domain
+separator. A fast hash here would have been a serious mistake: it would hand
+an attacker a cheap oracle for a passphrase otherwise protected by a 32 MB
+KDF. As built, guessing against a stolen index costs exactly what guessing
+against the ciphertext costs — and the salt it uses is the ciphertext's own,
+which is public anyway, sitting in the header inside a video whose link is in
+the same index.
+
+## What it does not do
+
+- **There is no recovery.** The passphrase is never stored, never logged and
+  never leaves the machine. Lose it and the file is gone.
+- **The index is not encrypted.** Filenames, sizes and links are in plain
+  SQLite on your disk. Anyone with that file learns what you have and where it
+  is — they just cannot read it.
+- **It is single-user and unauthenticated**, like the rest of the project. It
+  assumes the localhost or private-network deployment everything else here
+  assumes. Do not expose it to the internet as it stands.
+
+---
+
 # Tests
 
 ```bash
@@ -726,11 +874,19 @@ python bench/run_all.py
 | suite | covers |
 |---|---|
 | `test_native.py` | C engine matches NumPy pixel-for-pixel; packed and byte-per-bit paths agree; survives noise up to half the level spacing |
+| `test_rs_native.py` | The C Reed-Solomon codec agrees with `galois` on clean, corrupted and uncorrectable inputs |
 | `test_e2e.py` | Files → video → files byte-identical, across empty, tiny, compressible, incompressible and multi-file payloads |
+| `test_shards.py` | Shards supplied out of order, one missing, and shards from two uploads mixed — each detected rather than silently reassembled wrong |
 | `test_sidecar.py` | Description header round-trips; malformed input never raises; decoding identical with, without, and with a corrupt sidecar |
 | `test_audio.py` | Exact recovery through real AAC at 128/96/64 kbps, across RS chunk boundaries |
 | `test_audio_fallback.py` | Header recoverable from the audio track alone |
 | `test_compat.py` | Videos encoded by the previous release still decode byte-identically |
+| `test_crypto.py` | Round trips at every chunk boundary, and rejection of the wrong passphrase, a flipped bit, a weakened KDF parameter, truncation, reordering, duplication, and a chunk spliced from another file under the same key |
+| `test_library.py` | Name collisions, folder cycles, cascading deletes, breadcrumbs; and that no row holds file content |
+| `test_explorer_api.py` | Every HTTP route, chiefly the refusals — serving an unfetched file, a missing id, a folder as a file, a fetch with no passphrase or the wrong one |
+| `test_explorer_e2e.py` | File → archive → encrypt → video → decrypt → file, byte-identical, including across three shards; and that neither the contents nor the filename appear in the uploaded bytes |
+
+All twelve suites pass on this branch.
 
 The benchmark and sweep scripts (`bench_*.py`, `sweep_*.py`, `diag_*.py`,
 `profile_*.py`) are separate from the tests and reproduce every number in this
@@ -738,7 +894,7 @@ README.
 
 ## Version History
 
-| | v2 | v3 | v4 | v5 (v5/v6/v7) |
+| | v2 | v3 | v4 | v5 (v5/v6/v7/file_explorer) |
 |---|---|---|---|---|
 | Colour space | Grayscale | YUV 4:2:0 | YUV 4:2:0 | YUV 4:2:0 |
 | Bits per block | 1 | 2 Y / 1 C | 3 Y / 2 C | **2 Y / 3 C** |
@@ -753,6 +909,10 @@ README.
 | Description channel | — | — | — | **header sidecar + shard manifest** |
 | Audio channel rate | — | 100 bps | 100 bps | **6,300 bps (4-FSK)** |
 | Multi-video sharding | — | — | — | **yes, parallel (2.1x upload)** |
+
+This branch adds no format change of its own — the file explorer and its
+encryption sit entirely above the codec, which is why a file stored here
+decodes on `v5-max-throughput` too (given the passphrase).
 
 v5 carries 13% fewer bytes per frame than v4 and is the first version that
 actually round-trips through the service. `PROFILE_DENSE` carries 128,880 B per

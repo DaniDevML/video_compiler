@@ -20,6 +20,10 @@ TESTS = [
     ('audio channel',          'test_audio.py'),
     ('audio header fallback',  'test_audio_fallback.py'),
     ('v4 backward compat',     'test_compat.py'),
+    ('encryption',             'test_crypto.py'),
+    ('file explorer index',    'test_library.py'),
+    ('file explorer API',      'test_explorer_api.py'),
+    ('file explorer e2e',      'test_explorer_e2e.py'),
 ]
 
 

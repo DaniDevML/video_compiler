@@ -29,3 +29,10 @@ yt_token.pickle*
 .claude/
 *.md
 !README.md
+
+# The file explorer's index and its cache of files fetched back from YouTube.
+# The index holds every link the user has; the cache holds decrypted plaintext.
+library.db
+library.db-wal
+library.db-shm
+.cache/

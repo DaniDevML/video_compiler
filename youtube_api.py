@@ -424,3 +424,21 @@ def expand_playlist(url: str, progress=None) -> list:
             'holding an archive must be public or unlisted to be readable.')
     log(f'Playlist holds {len(urls)} video(s).')
     return urls
+
+
+def delete_video(video_id: str) -> None:
+    """Delete one uploaded video.
+
+    Irreversible, and the only call in this module that destroys anything, so
+    nothing invokes it implicitly. Removing a file from the explorer drops the
+    index row and leaves the video alone; this runs only when the user asks
+    for the video itself to go.
+    """
+    youtube = get_youtube_service(require_manage=True)
+    youtube.videos().delete(id=video_id).execute()
+
+
+def delete_playlist(playlist_id: str) -> None:
+    """Delete a playlist. The videos it points at are not affected."""
+    youtube = get_youtube_service(require_manage=True)
+    youtube.playlists().delete(id=playlist_id).execute()

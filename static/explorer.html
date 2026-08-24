@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VidCompiler — Files</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d0f12;
+    --surface: #161a20;
+    --surface2: #1b212a;
+    --border: #252b35;
+    --accent: #4f8ef7;
+    --accent2: #7c5bf7;
+    --green: #34d399;
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --radius: 12px;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  a { color: var(--accent); }
+
+  /* ---------------------------------------------------------------- chrome */
+  .topbar {
+    display: flex; align-items: center; gap: 16px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-wrap: wrap;
+  }
+  .brand {
+    font-size: 1.1rem; font-weight: 700; white-space: nowrap;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .brand small {
+    display: block; font-size: 0.68rem; font-weight: 500;
+    color: var(--muted); -webkit-text-fill-color: var(--muted);
+  }
+  .spacer { flex: 1; }
+
+  input[type=text], input[type=password], input[type=search] {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; font-size: 0.9rem; font-family: inherit;
+    min-width: 0;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+
+  button {
+    font-family: inherit; font-size: 0.88rem; font-weight: 600;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface2); color: var(--text);
+    padding: 8px 14px; cursor: pointer; white-space: nowrap;
+    transition: border-color .15s, background .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary {
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-color: transparent; color: #fff;
+  }
+  button.danger { color: var(--red); }
+  button.link {
+    background: none; border: none; color: var(--muted);
+    padding: 4px 6px; font-weight: 500;
+  }
+  button.link:hover { color: var(--text); }
+
+  /* ------------------------------------------------------------------ main */
+  main { flex: 1; padding: 18px 20px 60px; max-width: 1100px; width: 100%; margin: 0 auto; }
+
+  .pathbar {
+    display: flex; align-items: center; gap: 6px;
+    flex-wrap: wrap; margin-bottom: 14px; font-size: 0.9rem;
+  }
+  .crumb { color: var(--accent); cursor: pointer; }
+  .crumb.current { color: var(--text); cursor: default; }
+  .sep { color: var(--muted); }
+
+  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+
+  .dropzone {
+    border: 2px dashed var(--border); border-radius: var(--radius);
+    padding: 22px; text-align: center; color: var(--muted);
+    font-size: 0.88rem; margin-bottom: 18px; transition: all .15s;
+  }
+  .dropzone.over { border-color: var(--accent); color: var(--text); background: var(--surface); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-size: 0.72rem; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); font-weight: 600;
+    padding: 8px 10px; border-bottom: 1px solid var(--border);
+  }
+  td { padding: 10px; border-bottom: 1px solid var(--border); font-size: 0.9rem; vertical-align: middle; }
+  tr.row:hover { background: var(--surface); }
+  .nm { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .nm .icon { font-size: 1.15rem; width: 22px; text-align: center; }
+  .nm .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .num { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .actions { text-align: right; white-space: nowrap; }
+  .badge {
+    font-size: 0.68rem; padding: 2px 7px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .badge.enc { color: var(--green); border-color: #1e4635; }
+  .badge.shard { color: var(--yellow); border-color: #4a3a12; }
+
+  .empty { text-align: center; color: var(--muted); padding: 48px 12px; font-size: 0.9rem; }
+
+  .stats {
+    margin-top: 22px; font-size: 0.78rem; color: var(--muted);
+    display: flex; gap: 18px; flex-wrap: wrap;
+    border-top: 1px solid var(--border); padding-top: 14px;
+  }
+
+  /* ---------------------------------------------------------------- modals */
+  .backdrop {
+    position: fixed; inset: 0; background: rgba(4,6,9,.78);
+    display: none; align-items: center; justify-content: center;
+    padding: 20px; z-index: 40;
+  }
+  .backdrop.show { display: flex; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px;
+    width: 100%; max-width: 520px; max-height: 90vh;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .modal.wide { max-width: 940px; }
+  .modal h2 { font-size: 1.05rem; }
+  .modal p.hint { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+  .modal .row { display: flex; gap: 8px; }
+  .modal .row input { flex: 1; }
+  .modal .foot { display: flex; gap: 8px; justify-content: flex-end; }
+  .modal label.check {
+    display: flex; gap: 8px; align-items: flex-start;
+    font-size: 0.82rem; color: var(--muted); cursor: pointer;
+  }
+
+  .log {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-family: ui-monospace, Consolas, monospace;
+    font-size: 0.76rem; line-height: 1.55; color: var(--muted);
+    max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .err { color: var(--red); font-size: 0.84rem; min-height: 1em; }
+
+  .bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .bar > i {
+    display: block; height: 100%; width: 40%; border-radius: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    animation: slide 1.4s ease-in-out infinite;
+  }
+  @keyframes slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+
+  .preview-body {
+    flex: 1; min-height: 220px; overflow: auto;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  }
+  .preview-body img, .preview-body video { max-width: 100%; max-height: 62vh; display: block; }
+  .preview-body iframe { width: 100%; height: 62vh; border: 0; background: #fff; }
+  .preview-body pre {
+    width: 100%; height: 100%; max-height: 62vh; overflow: auto; padding: 14px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 0.78rem;
+    line-height: 1.55; white-space: pre-wrap; word-break: break-word; text-align: left;
+  }
+  .setup {
+    border: 1px solid var(--yellow); border-radius: var(--radius);
+    background: #1c1708; padding: 16px 18px; margin-bottom: 18px;
+    font-size: 0.85rem; line-height: 1.6; transition: border-color .15s;
+  }
+  .setup.over { border-color: var(--accent); background: var(--surface); }
+  .setup h3 { font-size: 0.92rem; margin-bottom: 8px; color: var(--yellow); }
+  .setup ol { padding-left: 20px; margin-bottom: 8px; color: var(--muted); }
+  .setup p { color: var(--muted); }
+  .setup code {
+    background: var(--bg); padding: 1px 5px; border-radius: 4px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 0.8rem;
+  }
+
+  .preview-meta { font-size: 0.78rem; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">VidCompiler
+    <small>your files, stored inside YouTube videos</small>
+  </div>
+  <div class="spacer"></div>
+  <input type="search" id="search" placeholder="Search files..." style="width:200px">
+  <a href="/codec"><button class="link">Codec tool</button></a>
+</div>
+
+<main>
+  <div class="setup" id="setup" style="display:none">
+    <h3>One-time setup: YouTube credentials</h3>
+    <ol>
+      <li>In the <strong>Google Cloud Console</strong>, create a project.</li>
+      <li>Enable the <strong>YouTube Data API v3</strong>.</li>
+      <li>Create <strong>OAuth 2.0 credentials</strong> of type <em>Desktop App</em>.</li>
+      <li>Download the JSON file and drop it here.</li>
+    </ol>
+    <p>Drop <code>client_secrets.json</code> anywhere in this box. The first
+       upload opens a browser once for Google sign-in; nothing is stored
+       beyond the token that produces.</p>
+    <div class="err" id="setupErr"></div>
+  </div>
+
+  <div class="pathbar" id="pathbar"></div>
+
+  <div class="toolbar">
+    <button class="primary" id="btnUpload">Upload file</button>
+    <button id="btnFolder">New folder</button>
+    <button class="link" id="btnRefresh">Refresh</button>
+  </div>
+
+  <div class="dropzone" id="drop">Drop a file here to store it on YouTube</div>
+
+  <table>
+    <thead>
+      <tr><th style="width:52%">Name</th><th>Size</th><th>Added</th><th></th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div class="empty" id="empty" style="display:none">
+    Nothing here yet. Upload a file and it will be encoded into a YouTube
+    video — only the link is kept on this machine.
+  </div>
+
+  <div class="stats" id="stats"></div>
+</main>
+
+<!-- ------------------------------------------------------------- upload -->
+<div class="backdrop" id="mUpload">
+  <div class="modal">
+    <h2 id="upTitle">Upload a file</h2>
+    <p class="hint" id="upName"></p>
+    <label class="check">
+      <input type="checkbox" id="upEncrypt">
+      <span>Encrypt this file. The archive is sealed with AES-256-GCM before
+      it becomes a video, so YouTube stores ciphertext — not your filenames,
+      not your contents.</span>
+    </label>
+    <div id="upPassWrap" style="display:none; flex-direction:column; gap:8px">
+      <input type="password" id="upPass" placeholder="Passphrase">
+      <input type="password" id="upPass2" placeholder="Repeat passphrase">
+      <p class="hint" style="color:var(--yellow)">
+        There is no recovery. Lose this passphrase and the file is gone.
+      </p>
+    </div>
+    <div class="err" id="upErr"></div>
+    <div class="foot">
+      <button data-close>Cancel</button>
+      <button class="primary" id="upGo">Upload</button>
+    </div>
+  </div>
+</div>
+
+<!-- ---------------------------------------------------------------- job -->
+<div class="backdrop" id="mJob">
+  <div class="modal">
+    <h2 id="jobTitle">Working...</h2>
+    <div class="bar"><i></i></div>
+    <div class="log" id="jobLog"></div>
+    <div class="err" id="jobErr"></div>
+    <div class="foot">
+      <button data-close id="jobClose" style="display:none">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ---------------------------------------------------------- ask text -->
+<div class="backdrop" id="mAsk">
+  <div class="modal">
+    <h2 id="askTitle"></h2>
+    <input type="text" id="askInput">
+    <div class="err" id="askErr"></div>
+    <div class="foot">
+      <button data-close>Cancel</button>
+      <button class="primary" id="askGo">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- ---------------------------------------------------------- notice -->
+<div class="backdrop" id="mNotice">
+  <div class="modal">
+    <h2 id="noticeTitle">Something went wrong</h2>
+    <p class="hint" id="noticeBody" style="white-space:pre-wrap"></p>
+    <div class="foot"><button class="primary" data-close>OK</button></div>
+  </div>
+</div>
+
+<!-- --------------------------------------------------------- passphrase -->
+<div class="backdrop" id="mPass">
+  <div class="modal">
+    <h2>Passphrase needed</h2>
+    <p class="hint" id="passFor"></p>
+    <input type="password" id="passInput" placeholder="Passphrase">
+    <div class="err" id="passErr"></div>
+    <div class="foot">
+      <button data-close>Cancel</button>
+      <button class="primary" id="passGo">Open</button>
+    </div>
+  </div>
+</div>
+
+<!-- ------------------------------------------------------------ preview -->
+<div class="backdrop" id="mPreview">
+  <div class="modal wide">
+    <h2 id="pvName"></h2>
+    <div class="preview-meta" id="pvMeta"></div>
+    <div class="preview-body" id="pvBody"></div>
+    <div class="foot">
+      <button id="pvCopy">Copy link</button>
+      <button id="pvDownload">Download</button>
+      <button data-close>Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- --------------------------------------------------------------- move -->
+<div class="backdrop" id="mMove">
+  <div class="modal">
+    <h2>Move to</h2>
+    <div id="moveList" style="max-height:50vh; overflow:auto; display:flex; flex-direction:column; gap:4px"></div>
+    <div class="foot"><button data-close>Cancel</button></div>
+  </div>
+</div>
+
+<!-- ------------------------------------------------------------- delete -->
+<div class="backdrop" id="mDelete">
+  <div class="modal">
+    <h2>Remove from library</h2>
+    <p class="hint" id="delWhat"></p>
+    <label class="check">
+      <input type="checkbox" id="delRemote">
+      <span>Also delete the YouTube video(s). <strong>This cannot be undone.</strong>
+      Left unchecked, the videos stay on your channel and the links are shown
+      here, so this is reversible.</span>
+    </label>
+    <div class="err" id="delErr"></div>
+    <div class="foot">
+      <button data-close>Cancel</button>
+      <button class="danger" id="delGo">Remove</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+let CURRENT = null;      // current folder id, null = root
+let ENTRIES = [];
+let PENDING_FILE = null; // File awaiting the upload dialog
+
+// ------------------------------------------------------------------ helpers
+function fmtBytes(n) {
+  if (n === null || n === undefined) return '—';
+  if (n === 0) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(v < 10 ? 1 : 0)) + ' ' + u[i];
+}
+
+function fmtDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function iconFor(e) {
+  if (e.kind === 'folder') return '📁';
+  const m = e.mime || '';
+  if (m.startsWith('image/')) return '🖼️';
+  if (m.startsWith('video/')) return '🎬';
+  if (m.startsWith('audio/')) return '🎵';
+  if (m === 'application/pdf') return '📕';
+  if (m.startsWith('text/') || m.includes('json') || m.includes('xml')) return '📄';
+  if (m.includes('zip') || m.includes('tar') || m.includes('compressed')) return '🗜️';
+  return '📦';
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  let body = {};
+  try { body = await res.json(); } catch (_) { /* not every response is JSON */ }
+  if (!res.ok) { body._status = res.status; throw body; }
+  return body;
+}
+
+function openModal(id) { $(id).classList.add('show'); }
+function closeModal(id) { $(id).classList.remove('show'); }
+
+document.querySelectorAll('[data-close]').forEach(b => {
+  b.addEventListener('click', () => b.closest('.backdrop').classList.remove('show'));
+});
+document.querySelectorAll('.backdrop').forEach(bd => {
+  bd.addEventListener('click', (ev) => { if (ev.target === bd) bd.classList.remove('show'); });
+});
+
+// ------------------------------------------------------------- ask / notice
+// Neither prompt() nor alert() is used anywhere here. Both are modal at the
+// browser level, both are blocked outright in some embedded webviews, and a
+// blocked prompt() returns null -- which would silently turn "New folder"
+// into a button that does nothing.
+function askText(title, initial) {
+  return new Promise((resolve) => {
+    $('askTitle').textContent = title;
+    $('askInput').value = initial || '';
+    $('askErr').textContent = '';
+    openModal('mAsk');
+    $('askInput').focus();
+    $('askInput').select();
+
+    const bd = $('mAsk');
+    const finish = (value) => {
+      $('askGo').onclick = null;
+      $('askInput').onkeydown = null;
+      bd.onclick = null;
+      closeModal('mAsk');
+      resolve(value);
+    };
+    bd.onclick = (ev) => { if (ev.target === bd) finish(null); };
+    bd.querySelector('[data-close]').onclick = () => finish(null);
+    $('askGo').onclick = () => {
+      const v = $('askInput').value.trim();
+      if (!v) { $('askErr').textContent = 'Enter a name.'; return; }
+      finish(v);
+    };
+    $('askInput').onkeydown = (ev) => { if (ev.key === 'Enter') $('askGo').click(); };
+  });
+}
+
+function notice(body, title) {
+  $('noticeTitle').textContent = title || 'Something went wrong';
+  $('noticeBody').textContent = body;
+  openModal('mNotice');
+}
+
+// --------------------------------------------------------------- job stream
+// One place that turns a job id into a promise, so every long operation gets
+// the same progress panel and the same error handling.
+function runJob(jobId, title) {
+  $('jobTitle').textContent = title;
+  $('jobLog').textContent = '';
+  $('jobErr').textContent = '';
+  $('jobClose').style.display = 'none';
+  openModal('mJob');
+
+  return new Promise((resolve, reject) => {
+    const es = new EventSource('/status/' + jobId);
+    es.onmessage = (ev) => {
+      const d = JSON.parse(ev.data);
+      if (d.type === 'progress') {
+        const log = $('jobLog');
+        log.textContent += (log.textContent ? '\n' : '') + d.message;
+        log.scrollTop = log.scrollHeight;
+      } else if (d.type === 'done') {
+        es.close();
+        closeModal('mJob');
+        resolve(d);
+      } else if (d.type === 'error') {
+        es.close();
+        $('jobErr').textContent = d.message;
+        $('jobClose').style.display = '';
+        reject(new Error(d.message));
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      $('jobErr').textContent = 'Lost contact with the server.';
+      $('jobClose').style.display = '';
+      reject(new Error('stream closed'));
+    };
+  });
+}
+
+// ------------------------------------------------------------------ listing
+async function load(parent, query) {
+  const params = new URLSearchParams();
+  if (parent) params.set('parent', parent);
+  if (query) params.set('q', query);
+  const data = await api('/api/fs/list?' + params.toString());
+  CURRENT = query ? CURRENT : data.parent;
+  ENTRIES = data.entries;
+  renderPath(data.trail, query);
+  renderRows(data.entries, query);
+  refreshStats();
+}
+
+function renderPath(trail, query) {
+  const bar = $('pathbar');
+  bar.innerHTML = '';
+  if (query) {
+    bar.append(Object.assign(document.createElement('span'),
+      { className: 'crumb current', textContent: `Search: "${query}"` }));
+    const back = Object.assign(document.createElement('button'),
+      { className: 'link', textContent: 'Clear' });
+    back.onclick = () => { $('search').value = ''; load(CURRENT); };
+    bar.append(back);
+    return;
+  }
+  const mk = (label, id, current) => {
+    const s = document.createElement('span');
+    s.className = 'crumb' + (current ? ' current' : '');
+    s.textContent = label;
+    if (!current) s.onclick = () => load(id);
+    return s;
+  };
+  bar.append(mk('Home', null, trail.length === 0));
+  trail.forEach((t, i) => {
+    bar.append(Object.assign(document.createElement('span'),
+      { className: 'sep', textContent: '/' }));
+    bar.append(mk(t.name, t.id, i === trail.length - 1));
+  });
+}
+
+function renderRows(entries, query) {
+  const tb = $('rows');
+  tb.innerHTML = '';
+  $('empty').style.display = entries.length ? 'none' : '';
+  if (!entries.length && query) {
+    $('empty').textContent = 'No files match that name.';
+  } else if (!entries.length) {
+    $('empty').textContent = 'Nothing here yet. Upload a file and it will be '
+      + 'encoded into a YouTube video — only the link is kept on this machine.';
+  }
+
+  for (const e of entries) {
+    const tr = document.createElement('tr');
+    tr.className = 'row';
+
+    const tdName = document.createElement('td');
+    const nm = document.createElement('div');
+    nm.className = 'nm';
+    nm.innerHTML = `<span class="icon">${iconFor(e)}</span>`;
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = e.name;
+    nm.append(label);
+    if (e.encrypted) {
+      nm.append(Object.assign(document.createElement('span'),
+        { className: 'badge enc', textContent: 'encrypted' }));
+    }
+    if (e.shards > 1) {
+      nm.append(Object.assign(document.createElement('span'),
+        { className: 'badge shard', textContent: e.shards + ' videos' }));
+    }
+    nm.onclick = () => (e.kind === 'folder' ? load(e.id) : openFile(e));
+    tdName.append(nm);
+
+    const tdSize = document.createElement('td');
+    tdSize.className = 'num';
+    tdSize.textContent = e.kind === 'folder' ? '—' : fmtBytes(e.size);
+
+    const tdDate = document.createElement('td');
+    tdDate.className = 'num';
+    tdDate.textContent = fmtDate(e.created_at);
+
+    const tdAct = document.createElement('td');
+    tdAct.className = 'actions';
+    const act = (text, fn) => {
+      const b = document.createElement('button');
+      b.className = 'link';
+      b.textContent = text;
+      b.onclick = (ev) => { ev.stopPropagation(); fn(); };
+      tdAct.append(b);
+    };
+    if (e.kind === 'file') act('Open', () => openFile(e));
+    act('Rename', () => doRename(e));
+    act('Move', () => doMove(e));
+    act('Delete', () => doDelete(e));
+
+    tr.append(tdName, tdSize, tdDate, tdAct);
+    tb.append(tr);
+  }
+}
+
+async function refreshStats() {
+  try {
+    const s = await api('/api/fs/stats');
+    $('stats').innerHTML = '';
+    const add = (t) => $('stats').append(
+      Object.assign(document.createElement('span'), { textContent: t }));
+    add(`${s.files} file${s.files === 1 ? '' : 's'} · ${s.folders} folder${s.folders === 1 ? '' : 's'}`);
+    add(`${fmtBytes(s.bytes)} stored on YouTube (${fmtBytes(s.stored)} uploaded)`);
+    add(`index: ${fmtBytes(s.index_bytes)} on this machine`);
+    add(`${s.encrypted} encrypted`);
+    const cache = document.createElement('span');
+    cache.textContent = `cache: ${fmtBytes(s.cache_bytes)}`;
+    if (s.cache_bytes > 0) {
+      const b = Object.assign(document.createElement('button'),
+        { className: 'link', textContent: 'clear' });
+      b.onclick = async () => {
+        await fetch('/api/fs/cache', { method: 'DELETE' });
+        refreshStats();
+      };
+      cache.append(' ', b);
+    }
+    $('stats').append(cache);
+  } catch (_) { /* stats are decoration; never block the view on them */ }
+}
+
+// ------------------------------------------------------------------- upload
+$('btnUpload').onclick = () => {
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.onchange = () => { if (picker.files[0]) askUpload(picker.files[0]); };
+  picker.click();
+};
+
+function askUpload(file) {
+  PENDING_FILE = file;
+  $('upName').textContent = `${file.name} — ${fmtBytes(file.size)}`;
+  $('upEncrypt').checked = false;
+  $('upPassWrap').style.display = 'none';
+  $('upPass').value = $('upPass2').value = '';
+  $('upErr').textContent = '';
+  openModal('mUpload');
+}
+
+$('upEncrypt').onchange = () => {
+  $('upPassWrap').style.display = $('upEncrypt').checked ? 'flex' : 'none';
+};
+
+$('upGo').onclick = async () => {
+  const encrypt = $('upEncrypt').checked;
+  const pass = $('upPass').value;
+  if (encrypt) {
+    if (pass.length < 8) {
+      $('upErr').textContent = 'Use at least 8 characters.';
+      return;
+    }
+    if (pass !== $('upPass2').value) {
+      $('upErr').textContent = 'The two passphrases do not match.';
+      return;
+    }
+  }
+
+  const fd = new FormData();
+  fd.append('file', PENDING_FILE);
+  if (CURRENT) fd.append('parent', CURRENT);
+  if (encrypt) fd.append('passphrase', pass);
+
+  closeModal('mUpload');
+  try {
+    const { job_id } = await api('/api/fs/upload', { method: 'POST', body: fd });
+    await runJob(job_id, `Storing ${PENDING_FILE.name}`);
+    load(CURRENT);
+  } catch (err) {
+    if (err && err.error) { $('jobErr').textContent = err.error; openModal('mJob'); }
+  } finally {
+    PENDING_FILE = null;
+  }
+};
+
+const drop = $('drop');
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, (e) => {
+  e.preventDefault(); drop.classList.add('over');
+}));
+['dragleave', 'drop'].forEach(t => drop.addEventListener(t, (e) => {
+  e.preventDefault(); drop.classList.remove('over');
+}));
+drop.addEventListener('drop', (e) => {
+  const f = e.dataTransfer.files[0];
+  if (f) askUpload(f);
+});
+
+// ------------------------------------------------------------------ folders
+$('btnFolder').onclick = async () => {
+  const name = await askText('New folder', 'New folder');
+  if (!name) return;
+  await api('/api/fs/folder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ parent: CURRENT, name }),
+  });
+  load(CURRENT);
+};
+
+$('btnRefresh').onclick = () => load(CURRENT, $('search').value.trim());
+
+let searchTimer = null;
+$('search').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    const q = $('search').value.trim();
+    load(CURRENT, q);
+  }, 250);
+});
+
+// ------------------------------------------------------------- open/preview
+async function openFile(entry) {
+  let passphrase = '';
+  if (entry.encrypted) {
+    passphrase = await askPassphrase(entry);
+    if (passphrase === null) return;
+  }
+
+  let res;
+  try {
+    res = await api('/api/fs/fetch/' + entry.id, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passphrase }),
+    });
+  } catch (err) {
+    notice(err.error || 'Could not open that file.', 'Cannot open');
+    return;
+  }
+
+  if (res.job_id) {
+    try {
+      await runJob(res.job_id, `Fetching ${entry.name} from YouTube`);
+    } catch (_) { return; }
+  }
+  showPreview(entry);
+}
+
+function askPassphrase(entry) {
+  return new Promise((resolve) => {
+    $('passFor').textContent = `${entry.name} is encrypted.`;
+    $('passInput').value = '';
+    $('passErr').textContent = '';
+    openModal('mPass');
+    $('passInput').focus();
+
+    const finish = (value) => {
+      $('passGo').onclick = null;
+      $('passInput').onkeydown = null;
+      bd.onclick = null;
+      closeModal('mPass');
+      resolve(value);
+    };
+    const bd = $('mPass');
+    bd.onclick = (ev) => { if (ev.target === bd) finish(null); };
+    bd.querySelector('[data-close]').onclick = () => finish(null);
+    $('passGo').onclick = () => {
+      const v = $('passInput').value;
+      if (!v) { $('passErr').textContent = 'Enter the passphrase.'; return; }
+      finish(v);
+    };
+    $('passInput').onkeydown = (ev) => { if (ev.key === 'Enter') $('passGo').click(); };
+  });
+}
+
+async function showPreview(entry) {
+  $('pvName').textContent = entry.name;
+  const meta = [fmtBytes(entry.size), entry.mime || 'unknown type'];
+  if (entry.encrypted) meta.push('encrypted');
+  if (entry.shards > 1) meta.push(`${entry.shards} videos`);
+  $('pvMeta').textContent = meta.join(' · ');
+
+  const body = $('pvBody');
+  body.innerHTML = '';
+  const url = '/api/fs/preview/' + entry.id;
+  const m = entry.mime || '';
+
+  if (m.startsWith('image/')) {
+    body.append(Object.assign(document.createElement('img'), { src: url, alt: entry.name }));
+  } else if (m.startsWith('video/')) {
+    const v = document.createElement('video');
+    v.src = url; v.controls = true;
+    body.append(v);
+  } else if (m.startsWith('audio/')) {
+    const a = document.createElement('audio');
+    a.src = url; a.controls = true; a.style.width = '100%';
+    body.append(a);
+  } else if (m === 'application/pdf') {
+    body.append(Object.assign(document.createElement('iframe'), { src: url }));
+  } else if (m.startsWith('text/') || m.includes('json') || m.includes('xml') || m.includes('javascript')) {
+    // Cap it: a browser asked to lay out a 200 MB log will simply stop.
+    const res = await fetch(url);
+    const buf = await res.arrayBuffer();
+    const limit = 1 << 20;
+    let text = new TextDecoder().decode(buf.slice(0, limit));
+    if (buf.byteLength > limit) text += `\n\n... (showing the first ${fmtBytes(limit)} of ${fmtBytes(buf.byteLength)})`;
+    body.append(Object.assign(document.createElement('pre'), { textContent: text }));
+  } else {
+    body.append(Object.assign(document.createElement('p'),
+      { className: 'empty', textContent: 'No preview for this type — download it instead.' }));
+  }
+
+  $('pvDownload').onclick = () => { window.location = '/api/fs/download/' + entry.id; };
+  $('pvCopy').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(entry.url);
+      $('pvCopy').textContent = 'Copied';
+      setTimeout(() => { $('pvCopy').textContent = 'Copy link'; }, 1200);
+    } catch (_) { notice(entry.url, 'Copy this link'); }
+  };
+  openModal('mPreview');
+}
+
+$('mPreview').addEventListener('click', (ev) => {
+  // Stop a playing video the moment the dialog closes.
+  if (ev.target === $('mPreview')) $('pvBody').innerHTML = '';
+});
+$('mPreview').querySelector('[data-close]').addEventListener('click', () => {
+  $('pvBody').innerHTML = '';
+});
+
+// ------------------------------------------------------------------ actions
+async function doRename(entry) {
+  const name = await askText('Rename', entry.name);
+  if (!name || name === entry.name) return;
+  try {
+    await api('/api/fs/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: entry.id, name }),
+    });
+    load(CURRENT, $('search').value.trim());
+  } catch (err) { notice(err.error || 'Rename failed.', 'Rename failed'); }
+}
+
+async function doMove(entry) {
+  const { folders } = await api('/api/fs/folders');
+  const list = $('moveList');
+  list.innerHTML = '';
+  for (const f of folders) {
+    const b = document.createElement('button');
+    b.textContent = f.path === '/' ? 'Home' : f.path;
+    b.style.textAlign = 'left';
+    b.onclick = async () => {
+      closeModal('mMove');
+      try {
+        await api('/api/fs/move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: entry.id, parent: f.id || null }),
+        });
+        load(CURRENT, $('search').value.trim());
+      } catch (err) { notice(err.error || 'Move failed.', 'Move failed'); }
+    };
+    list.append(b);
+  }
+  openModal('mMove');
+}
+
+function doDelete(entry) {
+  $('delWhat').textContent = entry.kind === 'folder'
+    ? `"${entry.name}" and everything inside it.`
+    : `"${entry.name}" (${fmtBytes(entry.size)}).`;
+  $('delRemote').checked = false;
+  $('delErr').textContent = '';
+  openModal('mDelete');
+
+  $('delGo').onclick = async () => {
+    try {
+      const res = await api('/api/fs/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: entry.id, delete_videos: $('delRemote').checked }),
+      });
+      closeModal('mDelete');
+      if (!$('delRemote').checked && res.links.length) {
+        console.info('Videos kept on YouTube:', res.links.join(' '));
+      }
+      if (res.delete_errors && res.delete_errors.length) {
+        notice('Removed from the library, but some videos could not be '
+          + 'deleted:\n' + res.delete_errors.join('\n'), 'Partly removed');
+      }
+      load(CURRENT, $('search').value.trim());
+    } catch (err) {
+      $('delErr').textContent = err.error || 'Delete failed.';
+    }
+  };
+}
+
+// ----------------------------------------------------------- credentials
+// Without this the first upload fails several seconds in with an error that
+// tells the user to drop a file on a box that is not on the page.
+async function checkCreds() {
+  try {
+    const res = await fetch('/api/creds_ok');
+    const ok = (await res.json()).ok;
+    $('setup').style.display = ok ? 'none' : '';
+  } catch (_) { /* leave the box hidden rather than guess */ }
+}
+
+const setup = $('setup');
+['dragenter', 'dragover'].forEach(t => setup.addEventListener(t, (e) => {
+  e.preventDefault(); setup.classList.add('over');
+}));
+['dragleave', 'drop'].forEach(t => setup.addEventListener(t, (e) => {
+  e.preventDefault(); setup.classList.remove('over');
+}));
+setup.addEventListener('drop', async (e) => {
+  const f = e.dataTransfer.files[0];
+  if (!f) return;
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    await api('/api/upload_creds', { method: 'POST', body: fd });
+    $('setupErr').textContent = '';
+    setup.style.display = 'none';
+  } catch (err) {
+    $('setupErr').textContent = err.error || 'That file was not accepted.';
+  }
+});
+
+load(null);
+checkCreds();
+</script>
+</body>
+</html>
