@@ -3,36 +3,87 @@
   <p align="center">
     Store any file inside a YouTube video — and recover it perfectly.
     <br />
-    Survives YouTube's full H.264 re-compression pipeline.
+    A duplicate of <code>dev</code>, kept for history.
   </p>
 </p>
 
 > [!IMPORTANT]
-> **Correction.** The line above is not true of this branch. Real upload and
-> download round trips through YouTube show this format loses data: the luma
-> plane comes back at a 3.6e-02 bit error rate, far past what the Reed-Solomon
-> code can repair. It had only ever been validated against its own encoder,
-> which reproduces the blocks exactly and so proves nothing about the service.
+> **This branch is byte-for-byte identical to [`dev`](../../tree/dev).**
+> `git diff dev optimization-v2` prints nothing. It carries no work that dev
+> does not, and it exists only so older links keep resolving.
 >
-> The cause is one parameter — 3 bits per block on the **luma** plane. Chroma
-> came back bit-perfect at every density tested, so the format was being careful
-> with the plane that needed no care.
+> Like dev, it is the v3 codec (`VIDCMPR3`: 2 bits per 4x4 block on luma, 1 on
+> each chroma plane, 40,140 bytes per frame), and **it has never been validated
+> against a real YouTube round trip** — every test here decodes a video made by
+> this same encoder, which proves nothing about the service.
 >
-> Fixed on [`v5-max-throughput`](../../tree/v5-max-throughput), where the format
-> is chosen from real round trips and a 1 GB payload recovers byte-identical.
-> [`v6-parallel`](../../tree/v6-parallel) adds sharding across concurrent
-> uploads on top of that.
-
+> For a version proven against the live service, use
+> [`v7-playlists`](../../tree/v7-playlists).
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/codec-H.264%20YUV%204%3A2%3A0-green" alt="H.264 YUV 4:2:0">
   <img src="https://img.shields.io/badge/ECC-Reed--Solomon-orange" alt="Reed-Solomon">
   <img src="https://img.shields.io/badge/pixel%20engine-C%20native-red" alt="C native">
-  <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey" alt="GPL-3.0 License">
 </p>
 
 ---
+
+## Branches
+
+| branch | codec | what it adds |
+|---|:--:|---|
+| [`dev`](../../tree/dev) | v3 | the original single-video pipeline: C pixel engine, FSK audio header, web UI |
+| **`optimization-v2`** (this one) | **v3** | identical in content to `dev`; kept only for history |
+| [`optimization-v3`](../../tree/optimization-v3) | v4 | the density experiment — 3 bpp on luma. Measured against real YouTube, it loses data |
+| [`v5-max-throughput`](../../tree/v5-max-throughput) | v5 | the first format chosen from real round trips, plus a native Reed-Solomon codec |
+| [`v6-parallel`](../../tree/v6-parallel) | v5 | sharding across concurrently uploaded videos, and a Windows executable |
+| [`v7-playlists`](../../tree/v7-playlists) | v5 | one playlist link per archive, a portable Docker image, faster archiving |
+| [`file_explorer`](../../tree/file_explorer) | v5 | a browsable file manager on top of v7, with encryption before upload |
+
+The frame format has not changed since v5 — a video encoded on
+`v5-max-throughput`, `v6-parallel`, `v7-playlists` or `file_explorer` decodes
+on all four. What the later branches add is everything around the format.
+
+## What each version can and cannot do
+
+The same table appears on every branch. This one is **`optimization-v2`**.
+
+| | `dev`<br>v3 | `optimization-v3`<br>v4 | `v5-max-`<br>`throughput` | `v6-parallel` | `v7-playlists` | `file_explorer` |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|
+| Data per frame | 40,140 B | 64,200 B | 56,100 B | 56,100 B | 56,100 B | 56,100 B |
+| Recovers a file that really went through YouTube | untested | **no** | yes | yes | yes | yes |
+| Verified byte-identical at 1 GB | no | no | yes | yes | yes | yes |
+| Threaded, packed-bit pixel engine | no | no | yes | yes | yes | yes |
+| Native C Reed-Solomon (32x decode) | no | no | yes | yes | yes | yes |
+| Header in audio *and* description | no | no | yes | yes | yes | yes |
+| Selectable density profiles | no | no | yes | yes | yes | yes |
+| Archives larger than one video | no | no | no | yes | yes | yes |
+| One link for a split archive | no | no | no | no | yes | yes |
+| Windows executable | no | no | no | yes | yes | yes |
+| Docker image | no | no | no | no | yes | yes |
+| Browsable file manager | no | no | no | no | no | yes |
+| Encryption before upload | no | no | no | no | no | yes |
+
+> "Verified byte-identical at 1 GB" means a single 1 GB video, uploaded to
+> YouTube and downloaded back. The **sharded** 1 GB path on `v6-parallel` and
+> later is not yet verified end to end — see *the error-correction margin*.
+
+### What this branch can do
+
+Exactly what [`dev`](../../tree/dev) can do — the two branches are
+**identical in content**, byte for byte, and only the names differ. Everything
+in dev's description applies here without change.
+
+### What it cannot do
+
+Everything dev cannot do, for the same reasons: the v3 format has never been
+validated against a real YouTube round trip, it stores one archive per video,
+and Reed-Solomon runs in `galois` rather than the native C decoder.
+
+This branch carries no work that `dev` does not. It is kept so old links keep
+resolving; there is no reason to start from it.
 
 ## How It Works
 
@@ -165,4 +216,15 @@ Processing time scales linearly with input size. Compressible formats (.txt, .js
 
 ## License
 
-[MIT](LICENSE)
+Copyright (C) 2026 DaniDevML
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License version 3** as published by the
+Free Software Foundation, either version 3 of the License, or (at your option)
+any later version. See [LICENSE](LICENSE) for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.
+
+> Relicensed from MIT, to match the rest of the project.
