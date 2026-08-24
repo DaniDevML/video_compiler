@@ -16,10 +16,11 @@
   <img src="https://img.shields.io/badge/upload-2.14x%20parallel-0E7490" alt="Parallel upload">
   <img src="https://img.shields.io/badge/docker-portable-2496ED?logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/crypto-AES--256--GCM-16A34A" alt="AES-256-GCM">
+  <img src="https://img.shields.io/badge/pipeline-5%20GB%20verified%20locally-0E7490" alt="5 GB verified locally">
   <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey" alt="GPL-3.0 License">
 </p>
 
-**Contents** — [Branches](#branches) · [What each version can and cannot do](#what-each-version-can-and-cannot-do) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Usage](#usage) · [Technical specs](#technical-specs) · [Performance](#performance) · [The v5 format](#the-v5-format-and-why-v4-had-to-change) · [Parallel shards](#parallel-shards) · [v7: one link](#v7-one-link-not-many) · [The file explorer](#the-file-explorer) · [Encryption](#encryption) · [Tests](#tests) · [License](#license)
+**Contents** — [Branches](#branches) · [What each version can and cannot do](#what-each-version-can-and-cannot-do) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Usage](#usage) · [Technical specs](#technical-specs) · [Performance](#performance) · [The v5 format](#the-v5-format-and-why-v4-had-to-change) · [Parallel shards](#parallel-shards) · [v7: one link](#v7-one-link-not-many) · [The file explorer](#the-file-explorer) · [Encryption](#encryption) · [Scaling](#scaling-10-mb-to-5-gb-measured) · [Tests](#tests) · [License](#license)
 
 ---
 
@@ -78,6 +79,9 @@ The same table appears on every branch. This one is **`file_explorer`**.
 - **Preview files in the browser** — images, text, PDF, audio, video — by
   fetching and decoding on demand, with a local cache so the second look is
   instant.
+- **Handle files up to 5 GB**, measured: nine round trips from 10 MB to 5 GB,
+  every one byte-identical, at a flat 12-13 MB/s encode and 9.8 MB/s decode.
+  See *Scaling* below for the graph and the memory ceiling behind it.
 
 ### What it cannot do
 
@@ -89,6 +93,10 @@ The same table appears on every branch. This one is **`file_explorer`**.
 - **Serve several users.** The index is per-installation and unauthenticated —
   it assumes the localhost or private-network deployment the rest of the
   project assumes. Do not expose it to the internet as-is.
+- **Go much past 5 GB on a normal machine.** The pipeline holds whole archives
+  in memory as `bytes`, so a 5 GB payload peaks near 15 GB during decode. It
+  succeeded on 32 GB of RAM and would not on 16 GB. Streaming through a
+  temporary file is the fix and is not done.
 - Everything on v7's list still applies: the error-correction margin, the
   playlist scope, the daily upload quota, and software encoding in the
   container.
@@ -863,6 +871,116 @@ the same index.
   assumes the localhost or private-network deployment everything else here
   assumes. Do not expose it to the internet as it stands.
 
+## The explorer, end to end at five sizes
+
+`bench/test_explorer_sizes.py` drives a **real waitress server** — configured
+exactly as `launcher.py` configures it — over real HTTP, with multipart
+uploads streamed from disk and real SSE progress. Upload, store, list, fetch,
+decode, decrypt, download, and check the SHA-256.
+
+Only the four YouTube transport calls are substituted, by a local directory
+standing in for the channel. The videos written there are the same H.264 files
+that would have been uploaded, decoded from disk exactly as they would be
+after a download.
+
+```bash
+python bench/test_explorer_sizes.py
+```
+
+| payload | encrypted | store | fetch | videos | uploaded | second open |
+|---|:--:|---|---|:--:|---|---|
+| 1 MB | no | 7.8 s* | 0.6 s | 1 | 3.17x | 32 ms |
+| 10 MB | yes | 1.8 s | 2.5 s | 1 | 3.16x | 94 ms |
+| 100 MB | no | 8.0 s | 9.4 s | 2 → playlist | 3.16x | 16 ms |
+| 500 MB | yes | 42.3 s | 53.2 s | 2 → playlist | 3.16x | 80 ms |
+| 1 GB | yes | 87.2 s | 110.0 s | 4 → playlist | 3.16x | 80 ms |
+
+\* the first run pays for ffmpeg probing and JIT warm-up; the 10 MB row four
+seconds later is the honest small-file figure.
+
+**62 checks, all passing.** Every payload came back byte-identical. Each
+encrypted case also confirms the wrong passphrase is refused *before* any
+download begins, and every multi-shard case confirms the videos were collected
+into a single playlist link rather than handed back as a list.
+
+The last line of the run is the branch's whole argument in one measurement:
+
+```
+5 files, 1611 MB of content, 5083 MB uploaded, index 20 KB
+```
+
+1.6 GB of files, indexed in **20 KB** on the local disk — and the 20 KB does
+not grow with file size.
+
+---
+
+# Scaling: 10 MB to 5 GB, measured
+
+Nine round trips through the explorer's full pipeline — tar, AES-256-GCM,
+Reed-Solomon, YUV frames, H.264, and all of it backwards. **Every one verified
+byte-identical by SHA-256.** Reproduce with:
+
+```bash
+python bench/bench_sizes.py
+```
+
+<p align="center">
+  <img src="static/size_sweep.png" alt="Encode and decode time by payload size, 10 MB to 5 GB" width="100%">
+</p>
+
+| payload | video | encode | decode | enc MB/s | dec MB/s | videos | result |
+|---|---|---|---|---|---|---|---|
+| 10 MB | 32 MB | 1.4 s | 1.7 s | 7.2 | 6.0 | 1 | identical |
+| 25 MB | 79 MB | 2.4 s | 3.3 s | 10.2 | 7.6 | 1 | identical |
+| 50 MB | 158 MB | 4.4 s | 6.2 s | 11.4 | 8.1 | 1 | identical |
+| 100 MB | 316 MB | 8.2 s | 10.7 s | 12.2 | 9.3 | 2 | identical |
+| 250 MB | 789 MB | 20.0 s | 25.2 s | 12.5 | 9.9 | 2 | identical |
+| 500 MB | 1.58 GB | 40.2 s | 50.9 s | 12.5 | 9.8 | 2 | identical |
+| 1 GB | 3.16 GB | 81.6 s | 102.9 s | 12.3 | 9.7 | 4 | identical |
+| 2 GB | 6.31 GB | 155.9 s | 204.9 s | 12.8 | 9.8 | 4 | identical |
+| 5 GB | 15.77 GB | 367.4 s | 512.4 s | 13.6 | 9.8 | 4 | identical |
+
+> **Local compute only.** No network transfer is included. Upload is by far the
+> largest term at any real size — a gigabyte to YouTube measured 1441 s against
+> these 82 s of encoding — and the daily quota makes a 5 GB upload sweep
+> impossible. These numbers answer "how long does my machine take", not "how
+> long until my file is on YouTube". For the network path see
+> *Real YouTube round trips* above.
+
+Payloads are incompressible random data, encrypted. That is the worst case for
+the archive stage and the densest possible input to the frame encoder, and it
+is what the explorer actually sees, since encryption makes everything
+incompressible before it reaches the codec.
+
+## What the measurements show
+
+**The pipeline is linear.** Encode holds 12–13 MB/s and decode 9.8 MB/s from
+100 MB all the way to 5 GB — a 50x range in which throughput moves by under
+10%. The curve tracks the linear reference on the log-log plot with no knee.
+Sharding does not disturb it either: 1, 2 and 4 videos all sit on the same
+line.
+
+**Decode is consistently ~1.4x slower than encode**, and the stage breakdown
+says why: it is not the error correction and not the cryptography. Encryption
+costs about 1% of encode time (AES-NI runs at multiple GB/s); tar and untar are
+smaller still. Essentially all of both bars is H.264 plus the pixel codec plus
+Reed-Solomon, and decode carries the extra work of *finding* and repairing
+errors rather than just adding parity.
+
+**Small payloads are dominated by fixed costs.** 10 MB runs at 7.2 MB/s
+against 13.6 MB/s at 5 GB — ffmpeg startup and per-video overhead that a large
+payload amortises away. The benchmark runs an unrecorded warm-up pass first,
+so this is genuine per-video overhead and not JIT compilation.
+
+**5 GB works, and it is close to a real ceiling.** It produced 15.77 GB of
+video across 4 videos in 6.1 minutes, and read it back in 8.5. The limit is
+memory, not time: the pipeline holds whole archives in RAM as `bytes`, so a
+5 GB payload peaks around 15 GB during decode (recovered ciphertext, then
+plaintext archive, then extraction). It completed on a 32 GB machine with
+~19 GB free. On 16 GB it would not, and `bench_sizes.py` records a
+`MemoryError` as a result rather than hiding it. Streaming the archive through
+a temporary file instead of a `bytes` object is the fix, and it is not done.
+
 ---
 
 # Tests
@@ -885,6 +1003,13 @@ python bench/run_all.py
 | `test_library.py` | Name collisions, folder cycles, cascading deletes, breadcrumbs; and that no row holds file content |
 | `test_explorer_api.py` | Every HTTP route, chiefly the refusals — serving an unfetched file, a missing id, a folder as a file, a fetch with no passphrase or the wrong one |
 | `test_explorer_e2e.py` | File → archive → encrypt → video → decrypt → file, byte-identical, including across three shards; and that neither the contents nor the filename appear in the uploaded bytes |
+
+Two heavier runs sit outside `run_all.py`, because they take minutes rather than seconds:
+
+| run | covers |
+|---|---|
+| `bench/test_explorer_sizes.py` | The explorer over real HTTP at 1 MB - 1 GB: upload, index, playlist, fetch, decrypt, download, SHA-256 |
+| `bench/bench_sizes.py` | The scaling sweep above, 10 MB - 5 GB, verifying every round trip |
 
 All twelve suites pass on this branch.
 
