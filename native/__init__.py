@@ -16,7 +16,14 @@ import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _LIB_NAME = 'frame_ops.dll' if sys.platform == 'win32' else 'frame_ops.so'
-_LIB_PATH = os.path.join(_HERE, _LIB_NAME)
+
+# A frozen build unpacks data files to a temporary directory, so the library
+# sits beside the unpacked package rather than next to this source file.
+_SEARCH = [os.path.join(_HERE, _LIB_NAME)]
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    _SEARCH.insert(0, os.path.join(sys._MEIPASS, 'native', _LIB_NAME))
+    _SEARCH.insert(1, os.path.join(sys._MEIPASS, _LIB_NAME))
+_LIB_PATH = next((c for c in _SEARCH if os.path.exists(c)), _SEARCH[0])
 
 _lib = None
 

@@ -18,8 +18,6 @@
 
 ---
 
----
-
 ## Branches
 
 | branch | contains |
@@ -69,9 +67,14 @@ Decoding reverses the pipeline: download → extract raw frames → decode pixel
 - **Sharding across videos** — archives larger than one video split automatically, and parallel uploads run 2.1x faster than a single stream
 - **Selectable density** — a `Profile` sets block size and bits per block independently per plane; the header records both, so any profile decodes
 - **Backward compatible** — decodes v4 (`VIDCMPR4`), v3 (`VIDCMPR3`), and legacy v2 (`VIDCMPR2`) videos
+- **Single executable** — one double-click starts the server and opens the app; no Python, ffmpeg or compiler needed
 - **Web UI** — drag-and-drop files, real-time progress via SSE, one-click decode
 
 ## Requirements
+
+- **Nothing, if you use `VidCompiler.exe`** — Python, ffmpeg and the native library are inside it
+
+To run from source instead:
 
 - Python 3.10+
 - ffmpeg on PATH (or installed via `imageio-ffmpeg`)
@@ -80,25 +83,48 @@ Decoding reverses the pipeline: download → extract raw frames → decode pixel
 
 ## Quick Start
 
+Download `VidCompiler.exe` and double-click it. It starts the server, opens
+your browser at the app, and prints the address in case it does not.
+
+Put your `client_secrets.json` beside the executable before first use. The app
+writes `yt_token.pickle` and a `.scratch` working folder there too — never
+inside the bundle, which a one-file build deletes on exit.
+
+> First launch takes about a minute: Reed-Solomon kernels are compiled on
+> first use. The page is already up while that happens, and the cache is
+> reused from then on.
+
+### Building the executable
+
 ```bash
-git clone https://github.com/DaniDevML/video_compiler.git
+python build_exe.py
 ```
+
+Produces `dist/VidCompiler.exe` (~143 MB — it carries Python, ffmpeg, numba
+and the native library). The build compiles `native/frame_ops.dll` first if it
+is missing, so the executable ships with the fast paths rather than the NumPy
+fallback.
+
+Scratch space is the thing to watch: a job needs roughly **7x the payload**
+free on whichever drive holds the executable — the uploaded copy, the ~3x
+encoded video, and the downloaded copy. Set `VIDCOMPILER_SCRATCH` to move it.
+
+### Running from source instead
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Build the native library (optional but strongly recommended — it is ~20x faster than the NumPy fallback):
-
 ```bash
 python native/build.py
 ```
 
-Then run the app and open [http://localhost:5000](http://localhost:5000):
-
 ```bash
-python app.py
+python launcher.py
 ```
+
+`launcher.py` is the same entry point the executable runs. `python app.py`
+still works if you want Flask's development server.
 
 ## Usage
 
@@ -107,12 +133,12 @@ python app.py
 1. Drop any files or folders onto the drop zone.
 2. Optionally set a video title.
 3. Click **Encode & Upload to YouTube**.
-4. Copy the returned URL — you need it to decode later.
+4. Copy the returned URL — or all of them, if it was split across several videos. Every one is needed to decode.
 
 ### Decode
 
 1. Switch to the **Decode from URL** tab.
-2. Paste the YouTube URL or video ID.
+2. Paste the YouTube URL or video ID. If the archive was split across several videos, paste every URL, one per line — all of them are needed.
 3. Click **Download & Decode**.
 4. Download the recovered files as a `.zip`.
 
@@ -132,6 +158,11 @@ video_compiler/
 │   ├── frame_ops.c     # C pixel encode/decode (hot path)
 │   ├── build.py        # Auto-detect compiler and build DLL/.so
 │   └── __init__.py     # ctypes loader with fallback detection
+├── launcher.py         # One entry point: serve, open the browser, stay up
+├── paths.py            # Resource vs user-data paths, frozen or from source
+├── shards.py           # Split an archive across parallel videos
+├── build_exe.py        # Build dist/VidCompiler.exe
+├── vidcompiler.spec    # PyInstaller recipe
 ├── bench/              # Benchmarks and test suites (see below)
 └── static/index.html   # Single-page web UI
 ```

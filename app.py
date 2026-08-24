@@ -17,7 +17,9 @@ os.environ.setdefault('NUMBA_CACHE_DIR', _numba_cache)
 
 from flask import Flask, Response, jsonify, request, send_from_directory, send_file
 
-app = Flask(__name__, static_folder='static')
+import paths
+
+app = Flask(__name__, static_folder=paths.resource('static'))
 
 # No hard cap on the upload. A 512 MB limit contradicted the whole point of the
 # tool -- a 1 GB file was rejected with a 413 before anything else ran. Set
@@ -25,15 +27,10 @@ app = Flask(__name__, static_folder='static')
 _max_mb = os.environ.get('VIDCOMPILER_MAX_UPLOAD_MB')
 app.config['MAX_CONTENT_LENGTH'] = int(_max_mb) * 1024 * 1024 if _max_mb else None
 
-# Scratch directory. Everything transient lands here: the uploaded copy, the
-# encoded video (about 3x the payload), and the downloaded copy on the way
-# back. That is roughly 7x the payload, which is far more than a system temp
-# directory usually has room for -- so it defaults to a folder beside the app
-# rather than to the system drive. Override with VIDCOMPILER_SCRATCH.
-SCRATCH = os.environ.get(
-    'VIDCOMPILER_SCRATCH',
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), '.scratch'))
-os.makedirs(SCRATCH, exist_ok=True)
+# Everything transient lands here: the uploaded copy, the encoded video (about
+# 3x the payload), and the downloaded copy on the way back -- roughly 7x the
+# payload, which is far more than a system temp directory usually has room for.
+SCRATCH = paths.scratch_dir()
 tempfile.tempdir = SCRATCH
 os.environ['TMP'] = os.environ['TEMP'] = os.environ['TMPDIR'] = SCRATCH
 
@@ -78,14 +75,14 @@ def _job_error(job_id: str, msg: str):
 # Background workers
 # ---------------------------------------------------------------------------
 
-def _keep_on_failure(job_id: str, paths: list) -> None:
+def _keep_on_failure(job_id: str, videos: list) -> None:
     """Preserve encoded videos when the upload is what failed.
 
     Encoding a large archive costs minutes, and the usual upload failures --
     a daily quota, a dropped connection -- are worth retrying against rather
     than re-encoding from scratch.
     """
-    for i, src in enumerate(paths):
+    for i, src in enumerate(videos):
         if not src or not os.path.exists(src):
             continue
         kept = os.path.join(SCRATCH, f'encoded_{job_id[:8]}_{i}.mp4')
@@ -115,9 +112,15 @@ def _encode_worker(job_id: str, file_paths: list, title: str):
                  f'{n} video{"s" if n > 1 else ""}.')
 
         out_dir = tempfile.mkdtemp(prefix='enc_')
+        def enc_progress(msg):
+            # Frame counters from several concurrent encodes are pure noise;
+            # the milestones around them are worth showing.
+            if n > 1 and 'frame ' in msg:
+                return
+            progress(msg)
+
         jobs = shards.encode_bytes_to_shards(
-            archive, out_dir, n_shards=n,
-            progress=progress if n == 1 else lambda m: None,
+            archive, out_dir, n_shards=n, progress=enc_progress,
             max_workers=n)
         videos = [j['path'] for j in jobs]
         if n > 1:
@@ -165,10 +168,10 @@ def _encode_worker(job_id: str, file_paths: list, title: str):
         # silently -- the browser then waited on a status stream that would
         # never produce a result.
         for v in videos:
-            for path in (v, v + '.sidecar'):
-                if path and os.path.exists(path):
+            for leftover in (v, v + '.sidecar'):
+                if leftover and os.path.exists(leftover):
                     try:
-                        os.unlink(path)
+                        os.unlink(leftover)
                     except OSError as e:
                         _job_progress(job_id, f'Note: could not remove a '
                                               f'temporary file '
@@ -233,7 +236,7 @@ def _decode_worker(job_id: str, urls: list):
 
 @app.route('/')
 def index():
-    return send_from_directory('static', 'index.html')
+    return send_from_directory(paths.resource('static'), 'index.html')
 
 
 @app.route('/encode', methods=['POST'])
@@ -358,7 +361,7 @@ def download(job_id: str):
 @app.route('/api/creds_ok')
 def creds_ok():
     """Return whether a valid client_secrets.json is already present."""
-    path = os.path.join(os.path.dirname(__file__), 'client_secrets.json')
+    path = paths.data('client_secrets.json')
     try:
         with open(path, 'r') as f:
             data = json.load(f)
@@ -393,7 +396,7 @@ def upload_creds():
     except Exception:
         return jsonify({'error': 'That file isn\'t valid JSON. Please re-download it from Google Cloud Console.'}), 400
 
-    dest = os.path.join(os.path.dirname(__file__), 'client_secrets.json')
+    dest = paths.data('client_secrets.json')
     with open(dest, 'w') as out:
         json.dump(data, out)
     return jsonify({'ok': True})

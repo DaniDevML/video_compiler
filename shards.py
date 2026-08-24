@@ -183,7 +183,15 @@ def encode_bytes_to_shards(archive: bytes, out_dir: str, n_shards: int = None,
     workers = max_workers or min(n, _default_workers())
 
     def run(job):
+        # Forward the encoder's own progress. Without this the caller sees
+        # nothing at all while a large shard encodes -- minutes of silence on
+        # a gigabyte. With several shards the lines are tagged, since they
+        # arrive interleaved from concurrent encodes.
+        def shard_progress(msg):
+            log(f'[{job["index"] + 1}/{n}] {msg}' if n > 1 else msg)
+
         ve.encode_bytes_to_video(job['data'], job['path'],
+                                 progress=shard_progress,
                                  extra_sidecar=job['manifest'])
         job.pop('data')
         job['bytes'] = os.path.getsize(job['path'])

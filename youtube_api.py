@@ -11,8 +11,13 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
-TOKEN_FILE = os.path.join(os.path.dirname(__file__), 'yt_token.pickle')
-CLIENT_SECRETS_FILE = os.path.join(os.path.dirname(__file__), 'client_secrets.json')
+# Credentials belong to the user and must outlive the process. In a frozen
+# build __file__ points inside the unpack directory, which is deleted on exit,
+# so anything written there would vanish.
+from paths import data as _data
+
+TOKEN_FILE = _data('yt_token.pickle')
+CLIENT_SECRETS_FILE = _data('client_secrets.json')
 
 
 def get_youtube_service():
@@ -153,14 +158,21 @@ def extract_video_id(url: str) -> str:
 
 
 def yt_dlp_command() -> list:
-    """Return an argv prefix that runs yt-dlp.
+    """Return an argv prefix that runs yt-dlp as a subprocess.
 
-    Prefers running it as a module through the current interpreter, which works
-    whenever the package is importable and does not depend on the console
-    script landing somewhere on PATH. Windows Store Python installs scripts
-    under a per-version LocalCache directory that is usually not on PATH, so
-    hunting for the .exe is the fragile path, not the reliable one.
+    Kept for callers that still shell out (the benchmarks). The application
+    itself uses the Python API below instead, because a frozen build has no
+    interpreter to hand: sys.executable is the application, so spawning
+    "sys.executable -m yt_dlp" would relaunch the whole app.
     """
+    if getattr(sys, 'frozen', False):
+        exe = shutil.which('yt-dlp')
+        if exe:
+            return [exe]
+        raise FileNotFoundError(
+            'yt-dlp is not available as a separate program. The frozen build '
+            'uses the bundled library directly; this path is only for '
+            'development use.')
     try:
         import yt_dlp  # noqa: F401
         return [sys.executable, '-m', 'yt_dlp']
@@ -184,13 +196,44 @@ def yt_dlp_command() -> list:
 
     raise FileNotFoundError(
         'The video downloader (yt-dlp) is not installed. '
-        'Open a terminal and run:  pip install yt-dlp  — then restart the app.'
-    )
+        'Open a terminal and run:  pip install yt-dlp')
 
 
 def _yt_dlp_executable() -> str:
     """Backwards-compatible shim for callers expecting a single path."""
     return yt_dlp_command()[-1]
+
+
+def _ydl(opts: dict):
+    """A YoutubeDL configured quietly, using the library in this process."""
+    import yt_dlp
+    base = {
+        'quiet': True,
+        'no_warnings': True,
+        'noprogress': True,
+        'noplaylist': True,
+        'logger': _NullLogger(),
+    }
+    base.update(opts)
+    return yt_dlp.YoutubeDL(base)
+
+
+class _NullLogger:
+    """yt-dlp writes to stdout by default; a windowed build has no stdout."""
+
+    def debug(self, msg): pass
+
+    def info(self, msg): pass
+
+    def warning(self, msg): pass
+
+    def error(self, msg): pass
+
+
+def video_info(url: str) -> dict:
+    """Metadata for a video without downloading it."""
+    with _ydl({'skip_download': True}) as ydl:
+        return ydl.extract_info(url, download=False) or {}
 
 
 def fetch_description(url: str) -> str:
@@ -200,25 +243,21 @@ def fetch_description(url: str) -> str:
     failure here is not worth surfacing -- the decoder falls back to reading
     the header out of the frames.
     """
-    kwargs = {}
-    if sys.platform == 'win32':
-        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
     try:
         video_id = extract_video_id(url)
-        proc = subprocess.run(
-            [*yt_dlp_command(), '--skip-download', '--no-playlist',
-             '--print', 'description',
-             f'https://www.youtube.com/watch?v={video_id}'],
-            capture_output=True, text=True, timeout=60, **kwargs)
-        return proc.stdout if proc.returncode == 0 else ''
+        info = video_info(f'https://www.youtube.com/watch?v={video_id}')
+        return info.get('description') or ''
     except Exception:
         return ''
 
 
 def download_video(url: str, output_path: str, progress=None) -> str:
     """
-    Download a YouTube video at 1080p using yt-dlp.
-    Returns the actual path of the downloaded file.
+    Download a YouTube video at 1080p. Returns the path actually written.
+
+    Uses yt-dlp as a library rather than a subprocess. A frozen build has no
+    interpreter to spawn -- sys.executable is the application itself -- so
+    shelling out would relaunch the whole app instead of downloading anything.
     """
     def log(msg):
         if progress:
@@ -230,50 +269,32 @@ def download_video(url: str, output_path: str, progress=None) -> str:
     video_id = extract_video_id(url)
     log(f'Downloading video {video_id}...')
 
-    # Download into a dedicated temp dir so we can find the file regardless of extension
     dl_dir = tempfile.mkdtemp()
     template = os.path.join(dl_dir, 'video')
 
-    # Video-only download at 1080p — no audio merge needed (we just need frames)
-    fmt = 'bestvideo[height=1080][ext=mp4]/bestvideo[height=1080]/bestvideo[ext=mp4]/bestvideo'
+    # Video-only: the frames carry the payload, and skipping the audio stream
+    # roughly halves what has to come down the wire.
+    fmt = ('bestvideo[height=1080][ext=mp4]/bestvideo[height=1080]/'
+           'bestvideo[ext=mp4]/bestvideo')
 
-    kwargs = {}
-    if sys.platform == 'win32':
-        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    with _ydl({'format': fmt,
+               'outtmpl': template + '.%(ext)s',
+               'overwrites': True,
+               'retries': 5,
+               'fragment_retries': 5}) as ydl:
+        ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
 
-    cmd = [
-        *yt_dlp_command(),
-        '--format', fmt,
-        '-o', template + '.%(ext)s',
-        '--no-playlist',
-        '--no-part',            # don't use .part temp files
-        f'https://www.youtube.com/watch?v={video_id}',
-    ]
-
-    proc = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-    log(f'yt-dlp stdout: {proc.stdout[-300:]}')
-    if proc.returncode != 0:
-        raise RuntimeError(
-            'Could not download the video from YouTube. '
-            'Make sure the URL is correct and the video is still publicly accessible. '
-            f'(yt-dlp exit code {proc.returncode})'
-        )
-
-    # Find the downloaded file (extension may vary)
     candidates = glob.glob(template + '.*')
     if not candidates:
         raise RuntimeError(
             'The download finished but no video file was saved. '
-            'This is unusual — please try again. If it keeps failing, '
-            'make sure yt-dlp is up to date by running:  pip install -U yt-dlp'
+            'This is unusual - please try again.'
         )
 
     downloaded = candidates[0]
-    log(f'Downloaded: {os.path.basename(downloaded)} ({os.path.getsize(downloaded):,} bytes)')
+    log(f'Downloaded: {os.path.basename(downloaded)} '
+        f'({os.path.getsize(downloaded):,} bytes)')
 
-    # Move to the expected output path
-    import shutil
     shutil.move(downloaded, output_path)
-
     log('Video downloaded successfully.')
     return output_path
