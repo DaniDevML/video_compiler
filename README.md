@@ -17,27 +17,87 @@
   <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey" alt="GPL-3.0 License">
 </p>
 
+**Contents** — [Branches](#branches) · [What each version can and cannot do](#what-each-version-can-and-cannot-do) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Usage](#usage) · [Technical specs](#technical-specs) · [Performance](#performance) · [The v5 format](#the-v5-format-and-why-v4-had-to-change) · [Parallel shards](#parallel-shards) · [v7: one link](#v7-one-link-not-many) · [Tests](#tests) · [License](#license)
+
 ---
 
 ## Branches
 
-| branch | contains |
-|---|---|
-| `dev` | the original v4 codec |
-| `v5-max-throughput` | the v5 format and the single-video pipeline |
-| `v6-parallel` | v5 plus sharding across parallel videos |
-| **`v7-playlists`** (this one) | v6 plus playlists, Docker, and a faster archive stage |
+| branch | codec | what it adds |
+|---|:--:|---|
+| [`dev`](../../tree/dev) | v3 | the original single-video pipeline: C pixel engine, FSK audio header, web UI |
+| [`optimization-v2`](../../tree/optimization-v2) | v3 | identical in content to `dev`; kept only for history |
+| [`optimization-v3`](../../tree/optimization-v3) | v4 | the density experiment — 3 bpp on luma. Measured against real YouTube, it loses data |
+| [`v5-max-throughput`](../../tree/v5-max-throughput) | v5 | the first format chosen from real round trips, plus a native Reed-Solomon codec |
+| [`v6-parallel`](../../tree/v6-parallel) | v5 | sharding across concurrently uploaded videos, and a Windows executable |
+| **`v7-playlists`** (this one) | **v5** | one playlist link per archive, a portable Docker image, faster archiving |
+| [`file_explorer`](../../tree/file_explorer) | v5 | a browsable file manager on top of v7, with encryption before upload |
 
-The frame format has not changed since v5 — a video encoded on any of these
-branches decodes on all of them. What v6 and v7 add is everything around it.
+The frame format has not changed since v5 — a video encoded on
+`v5-max-throughput`, `v6-parallel`, `v7-playlists` or `file_explorer` decodes
+on all four. What the later branches add is everything around the format.
 
-v7 adds three things:
+## What each version can and cannot do
 
-- **One link instead of many.** A split archive is collected into a YouTube
-  playlist, and the decoder takes that playlist link on its own.
-- **Docker.** A portable image that runs anywhere, with no CUDA assumption.
-- **A faster archive stage.** gzip is skipped when it cannot help, which is
-  6x faster on incompressible input.
+The same table appears on every branch. This one is **`v7-playlists`**.
+
+| | `dev`<br>v3 | `optimization-v3`<br>v4 | `v5-max-`<br>`throughput` | `v6-parallel` | `v7-playlists` | `file_explorer` |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|
+| Data per frame | 40,140 B | 64,200 B | 56,100 B | 56,100 B | 56,100 B | 56,100 B |
+| Recovers a file that really went through YouTube | untested | **no** | yes | yes | **yes** | yes |
+| Verified byte-identical at 1 GB | no | no | yes | yes | **yes** | yes |
+| Threaded, packed-bit pixel engine | no | no | yes | yes | **yes** | yes |
+| Native C Reed-Solomon (32x decode) | no | no | yes | yes | **yes** | yes |
+| Header in audio *and* description | no | no | yes | yes | **yes** | yes |
+| Selectable density profiles | no | no | yes | yes | **yes** | yes |
+| Archives larger than one video | no | no | no | yes | **yes** | yes |
+| One link for a split archive | no | no | no | no | **yes** | yes |
+| Windows executable | no | no | no | yes | **yes** | yes |
+| Docker image | no | no | no | no | **yes** | yes |
+| Browsable file manager | no | no | no | no | no | yes |
+| Encryption before upload | no | no | no | no | no | yes |
+
+> "Verified byte-identical at 1 GB" means a single 1 GB video, uploaded to
+> YouTube and downloaded back. The **sharded** 1 GB path on `v6-parallel` and
+> later is not yet verified end to end — see *the error-correction margin*.
+
+### What this branch can do
+
+- Everything [`v6-parallel`](../../tree/v6-parallel) does, with the same frame
+  format and the same interchangeable videos.
+- **Hand back one link instead of many.** A split archive is collected into an
+  unlisted YouTube playlist, which also records the order, and the decoder
+  takes that playlist link on its own.
+- **Run anywhere, from a Docker image** that deliberately does not depend on
+  CUDA, so it needs no host driver and no container runtime beyond Docker
+  itself. Built and verified: the image serves the page, reports `healthy`, and
+  passes the native, Reed-Solomon, shard and end-to-end suites inside the
+  container.
+- **Skip gzip when it cannot help**, which takes archiving of incompressible
+  input from 31.9 MB/s to **190.9 MB/s** — about 28 seconds off a gigabyte.
+- **Start uploading before encoding finishes.** Each shard uploads as soon as
+  it is encoded, so the first upload begins around 25 seconds in rather than 95.
+
+### What it cannot do
+
+- **Create a playlist with upload-only credentials.** Playlists need the
+  `youtube` scope rather than `youtube.upload`, so the first run after
+  upgrading asks for consent again. Where only the narrower grant exists, the
+  upload still succeeds and the individual links come back instead, with a
+  warning that all of them are needed. *Decoding* a playlist needs no
+  credentials at all — it reads the link with yt-dlp.
+- **Guarantee a large sharded upload.** Unchanged from v6, and unresolved:
+  the default profile spends ~14% of its blocks on repair even when healthy,
+  and one shard of a 1 GB run crossed the line. `PROFILE_ROBUST` is the
+  measured fix and is not yet the default. See *the error-correction margin*.
+- **Use your GPU inside the container.** Without `--gpus all` it encodes in
+  software, which uploads about **31% more bytes** for the same payload
+  (4.14x expansion against 3.16x). The recovered data is identical either way;
+  you pay in upload time.
+- **Beat YouTube's daily upload limit.** Large or repeated runs will hit
+  `uploadLimitExceeded`, which is a platform quota and is not worked around.
+- No file manager, no encryption — those are on
+  [`file_explorer`](../../tree/file_explorer).
 
 ## How It Works
 
@@ -281,7 +341,7 @@ the same 256 MB video, decode went from **1252 s to 38.8 s — 32x faster**.
 
 A 1 GB archive becomes an 11-minute 1080p video. Note that puts a ceiling on a
 single video: YouTube caps unverified accounts at 15 minutes, which at this
-profile is about 1.7 GB.
+profile is about 1.28 GB (56,100 B/frame x 30 fps x 900 s x 215/255).
 
 **YouTube returns less than it was given** — 2.44 GB back from a 3.38 GB
 upload. It re-encodes everything, which is why the upload quantiser can be
@@ -678,7 +738,7 @@ README.
 
 ## Version History
 
-| | v2 | v3 | v4 | v5/v6 |
+| | v2 | v3 | v4 | v5 (v5/v6/v7) |
 |---|---|---|---|---|
 | Colour space | Grayscale | YUV 4:2:0 | YUV 4:2:0 | YUV 4:2:0 |
 | Bits per block | 1 | 2 Y / 1 C | 3 Y / 2 C | **2 Y / 3 C** |
