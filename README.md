@@ -3,7 +3,7 @@
   <p align="center">
     Store any file inside a YouTube video — and recover it perfectly.
     <br />
-    Survives YouTube's full H.264 re-compression pipeline.
+    The v4 density experiment. It does not survive YouTube; that is the point.
   </p>
 </p>
 
@@ -19,9 +19,12 @@
 > with the plane that needed no care.
 >
 > Fixed on [`v5-max-throughput`](../../tree/v5-max-throughput), where the format
-> is chosen from real round trips and a 1 GB payload recovers byte-identical.
-> [`v6-parallel`](../../tree/v6-parallel) adds sharding across concurrent
-> uploads on top of that.
+> is chosen from real round trips and a 1 GB payload recovers byte-identical —
+> by dropping luma to 2 bits per block and *raising* chroma to 3, the reverse of
+> what this branch assumed. For the current version, use
+> [`v7-playlists`](../../tree/v7-playlists).
+>
+> This branch is kept because it is the measurement that produced v5.
 
 
 <p align="center">
@@ -29,10 +32,78 @@
   <img src="https://img.shields.io/badge/codec-H.264%20YUV%204%3A2%3A0-green" alt="H.264 YUV 4:2:0">
   <img src="https://img.shields.io/badge/ECC-Reed--Solomon-orange" alt="Reed-Solomon">
   <img src="https://img.shields.io/badge/pixel%20engine-C%20native-red" alt="C native">
-  <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey" alt="GPL-3.0 License">
 </p>
 
 ---
+
+## Branches
+
+| branch | codec | what it adds |
+|---|:--:|---|
+| [`dev`](../../tree/dev) | v3 | the original single-video pipeline: C pixel engine, FSK audio header, web UI |
+| [`optimization-v2`](../../tree/optimization-v2) | v3 | identical in content to `dev`; kept only for history |
+| **`optimization-v3`** (this one) | **v4** | the density experiment — 3 bpp on luma. Measured against real YouTube, it loses data |
+| [`v5-max-throughput`](../../tree/v5-max-throughput) | v5 | the first format chosen from real round trips, plus a native Reed-Solomon codec |
+| [`v6-parallel`](../../tree/v6-parallel) | v5 | sharding across concurrently uploaded videos, and a Windows executable |
+| [`v7-playlists`](../../tree/v7-playlists) | v5 | one playlist link per archive, a portable Docker image, faster archiving |
+| [`file_explorer`](../../tree/file_explorer) | v5 | a browsable file manager on top of v7, with encryption before upload |
+
+The frame format has not changed since v5 — a video encoded on
+`v5-max-throughput`, `v6-parallel`, `v7-playlists` or `file_explorer` decodes
+on all four. What the later branches add is everything around the format.
+
+## What each version can and cannot do
+
+The same table appears on every branch. This one is **`optimization-v3`**.
+
+| | `dev`<br>v3 | `optimization-v3`<br>v4 | `v5-max-`<br>`throughput` | `v6-parallel` | `v7-playlists` | `file_explorer` |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|
+| Data per frame | 40,140 B | 64,200 B | 56,100 B | 56,100 B | 56,100 B | 56,100 B |
+| Recovers a file that really went through YouTube | untested | **no** | yes | yes | yes | yes |
+| Verified byte-identical at 1 GB | no | no | yes | yes | yes | yes |
+| Threaded, packed-bit pixel engine | no | no | yes | yes | yes | yes |
+| Native C Reed-Solomon (32x decode) | no | no | yes | yes | yes | yes |
+| Header in audio *and* description | no | no | yes | yes | yes | yes |
+| Selectable density profiles | no | no | yes | yes | yes | yes |
+| Archives larger than one video | no | no | no | yes | yes | yes |
+| One link for a split archive | no | no | no | no | yes | yes |
+| Windows executable | no | no | no | yes | yes | yes |
+| Docker image | no | no | no | no | yes | yes |
+| Browsable file manager | no | no | no | no | no | yes |
+| Encryption before upload | no | no | no | no | no | yes |
+
+> "Verified byte-identical at 1 GB" means a single 1 GB video, uploaded to
+> YouTube and downloaded back. The **sharded** 1 GB path on `v6-parallel` and
+> later is not yet verified end to end — see *the error-correction margin*.
+
+### What this branch can do
+
+- Everything [`dev`](../../tree/dev) does, at **64,200 bytes per frame** —
+  1.6x the density, by writing 3 bits per 4x4 block on luma and 2 on each
+  chroma plane.
+- Round-trip that density perfectly through its own encoder, at any file size,
+  with error correction barely working.
+
+### What it cannot do
+
+- **Recover a file that has actually passed through YouTube.** This is the
+  branch where that was finally measured, and it is the whole reason v5 exists:
+
+  | plane | bit error rate after a real round trip |
+  |---|---|
+  | luma, 3 bpp | **3.6e-02** — far past what RS(255, 215) can repair |
+  | chroma, 2 bpp | bit-perfect |
+
+  Eight gray levels leaves 36 units between them; YouTube's re-encode moves
+  pixels further than that. The format was being careful with chroma, the plane
+  that needed no care, and reckless with luma, the plane that did.
+- Everything else on dev's list: one archive per video, `galois` Reed-Solomon,
+  no profiles, sharding, playlist, executable or Docker image.
+
+Kept because it is the measurement that produced v5, not because it should be
+used. [`v5-max-throughput`](../../tree/v5-max-throughput) fixes it by dropping
+luma to 2 bpp and *raising* chroma to 3.
 
 ## How It Works
 
@@ -168,4 +239,15 @@ Processing time scales linearly with input size. Compressible formats (.txt, .js
 
 ## License
 
-[MIT](LICENSE)
+Copyright (C) 2026 DaniDevML
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License version 3** as published by the
+Free Software Foundation, either version 3 of the License, or (at your option)
+any later version. See [LICENSE](LICENSE) for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.
+
+> Relicensed from MIT, to match the rest of the project.
