@@ -30,8 +30,29 @@ import webbrowser
 
 import paths
 
-HOST = '127.0.0.1'
-PREFERRED_PORT = 5000
+def _in_container() -> bool:
+    """Whether we are running inside a container.
+
+    Matters for two reasons: there is no browser to open, and binding to
+    loopback would make the service unreachable from the host.
+    """
+    if os.environ.get('VIDCOMPILER_CONTAINER'):
+        return True
+    if os.path.exists('/.dockerenv'):
+        return True
+    try:
+        with open('/proc/1/cgroup', encoding='utf-8') as f:
+            return any(k in f.read() for k in ('docker', 'kubepods', 'containerd'))
+    except OSError:
+        return False
+
+
+CONTAINER = _in_container()
+# In a container bind every interface, or the published port reaches nothing.
+HOST = os.environ.get('VIDCOMPILER_HOST') or ('0.0.0.0' if CONTAINER else '127.0.0.1')
+BROWSE_HOST = '127.0.0.1' if HOST in ('0.0.0.0', '::') else HOST
+PREFERRED_PORT = int(os.environ.get('VIDCOMPILER_PORT') or 5000)
+OPEN_BROWSER = not CONTAINER and not os.environ.get('VIDCOMPILER_NO_BROWSER')
 BANNER = r"""
   VidCompiler
   ------------------------------------------------------------
@@ -58,7 +79,7 @@ def wait_until_serving(port: int, timeout: float = 60.0) -> bool:
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(0.5)
-            if s.connect_ex((HOST, port)) == 0:
+            if s.connect_ex((BROWSE_HOST, port)) == 0:
                 return True
         time.sleep(0.2)
     return False
@@ -100,7 +121,7 @@ def main() -> int:
     print(f'  scratch:        {paths.scratch_dir()}', flush=True)
 
     port = find_port()
-    url = f'http://{HOST}:{port}/'
+    url = f'http://{BROWSE_HOST}:{port}/'
 
     server = threading.Thread(target=serve, args=(port,), daemon=True)
     server.start()
@@ -113,13 +134,18 @@ def main() -> int:
     print(f'  serving at {url}', flush=True)
     threading.Thread(target=warm_up, daemon=True).start()
 
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
-    print('  A browser window should have opened. If not, paste the address '
-          'above.', flush=True)
-    print('  Close this window to stop the server.', flush=True)
+    if OPEN_BROWSER:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        print('  A browser window should have opened. If not, paste the '
+              'address above.', flush=True)
+        print('  Close this window to stop the server.', flush=True)
+    else:
+        print('  Open that address in a browser on your host machine.',
+              flush=True)
+        print('  Ctrl-C to stop.', flush=True)
 
     try:
         while server.is_alive():

@@ -27,6 +27,11 @@ else:
     RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = RESOURCE_DIR
 
+# A container mounts its writable volume somewhere unrelated to the code, so
+# the data directory has to be settable independently.
+DATA_DIR = os.environ.get('VIDCOMPILER_DATA') or DATA_DIR
+os.makedirs(DATA_DIR, exist_ok=True)
+
 
 def resource(*parts) -> str:
     """A read-only file shipped with the application."""
@@ -48,3 +53,35 @@ def scratch_dir() -> str:
     p = os.environ.get('VIDCOMPILER_SCRATCH') or data('.scratch')
     os.makedirs(p, exist_ok=True)
     return p
+
+
+def ffmpeg_exe() -> str:
+    """Path to an ffmpeg binary.
+
+    Prefers the binary imageio-ffmpeg carries. That is deliberate: the upload
+    quantiser and NVENC preset were tuned against it, and a different build
+    encodes the same frames to a noticeably different size -- swapping in the
+    system ffmpeg measured 4.14x expansion where the bundled one gives 3.16x,
+    which is a third more to upload for no benefit.
+
+    VIDCOMPILER_FFMPEG overrides, and a system ffmpeg is the fallback when the
+    bundled one is unavailable.
+    """
+    import shutil
+
+    override = os.environ.get('VIDCOMPILER_FFMPEG')
+    if override and os.path.exists(override):
+        return override
+
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+
+    found = shutil.which('ffmpeg')
+    if found:
+        return found
+    raise FileNotFoundError('No ffmpeg binary found.')

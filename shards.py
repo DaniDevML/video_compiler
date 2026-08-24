@@ -212,6 +212,68 @@ def encode_bytes_to_shards(archive: bytes, out_dir: str, n_shards: int = None,
     return out
 
 
+def encode_workers() -> int:
+    """Concurrent shard encodes worth running.
+
+    Consumer NVENC caps concurrent sessions at two or three, and the pixel and
+    Reed-Solomon stages already use every core, so beyond about three the
+    shards just re-divide the same hardware.
+    """
+    return max(1, min(3, (os.cpu_count() or 4) // 2))
+
+
+def iter_encoded_shards(archive: bytes, out_dir: str, n_shards: int = None,
+                        progress=None, max_workers: int = None):
+    """Encode shards, yielding each as soon as it is finished.
+
+    Lets the caller start uploading a shard while the rest are still encoding.
+    Uploading dominates end-to-end time, so beginning the first upload after
+    the first shard rather than after the last one takes that wait off the
+    total outright.
+
+    Yields in completion order, not index order; every job carries its index.
+    """
+    def log(msg):
+        if progress:
+            progress(msg)
+
+    os.makedirs(out_dir, exist_ok=True)
+    total = len(archive)
+    crc = zlib.crc32(archive) & 0xFFFFFFFF
+    slices = plan_shards(total, n_shards)
+    n = len(slices)
+    log(f'Archive {total:,} bytes -> {n} shard(s)')
+
+    jobs = []
+    for i, (off, ln) in enumerate(slices):
+        jobs.append(dict(index=i, offset=off, length=ln,
+                         manifest=pack_manifest(total, crc, n, i, off, ln),
+                         path=os.path.join(out_dir, f'shard{i:03d}.mp4'),
+                         data=archive[off:off + ln]))
+
+    workers = max_workers or min(n, encode_workers())
+
+    def run(job):
+        def shard_progress(msg):
+            log(f'[{job["index"] + 1}/{n}] {msg}' if n > 1 else msg)
+        ve.encode_bytes_to_video(job['data'], job['path'],
+                                 progress=shard_progress,
+                                 extra_sidecar=job['manifest'])
+        job.pop('data')
+        job['bytes'] = os.path.getsize(job['path'])
+        return job
+
+    if workers <= 1 or n == 1:
+        for job in jobs:
+            yield run(job)
+        return
+
+    with _fut.ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(run, j) for j in jobs]
+        for fut in _fut.as_completed(futures):
+            yield fut.result()
+
+
 def _default_workers() -> int:
     return max(1, min(4, (os.cpu_count() or 4) // 2))
 

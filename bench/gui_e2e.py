@@ -184,10 +184,14 @@ def main(mb=8.0, keep=False):
         done = stream_job(r['job_id'])
         encode_s = time.perf_counter() - t0
         urls = done.get('urls') or ([done['url']] if done.get('url') else [])
+        playlist = done.get('playlist')
         log(f'encode+upload finished in {encode_s:.1f}s -> '
             f'{len(urls)} video(s)')
         for u in urls:
             log(f'  {u}')
+        if playlist:
+            log(f'playlist: {playlist}')
+            log('decoding from the playlist link alone')
 
         log('waiting for the 1080p rendition on every video...')
         sys.path.insert(0, HERE)
@@ -200,7 +204,8 @@ def main(mb=8.0, keep=False):
         proc_s = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        d = post_decode(urls)
+        # A playlist link should be sufficient on its own.
+        d = post_decode([playlist] if playlist else urls)
         if 'error' in d:
             raise RuntimeError(f'/decode rejected: {d["error"]}')
         done2 = stream_job(d['job_id'])

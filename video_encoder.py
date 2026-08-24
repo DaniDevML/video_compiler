@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import imageio_ffmpeg
 
+import paths
+
 from video_codec import (
     BLOCK_SIZE, FRAME_WIDTH, FRAME_HEIGHT, YUV_FRAME_BYTES,
     BITS_PER_FRAME, BYTES_PER_FRAME,
@@ -110,7 +112,7 @@ UPLOAD_QP = 44
 
 
 def _probe_hw_encoder() -> tuple:
-    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    exe = paths.ffmpeg_exe()
     kw  = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
     if sys.platform == 'win32':
         kw['creationflags'] = subprocess.CREATE_NO_WINDOW
@@ -161,10 +163,53 @@ def _get_encoder():
 # Archive
 # ---------------------------------------------------------------------------
 
-def create_archive(paths: list) -> bytes:
+def _looks_compressible(file_paths: list, sample_bytes: int = 2 << 20) -> bool:
+    """Cheap guess at whether gzip will earn its keep.
+
+    Compressing incompressible input is pure loss: measured on 256 MB of random
+    bytes, gzip level 1 cost 8.4 s and produced a file no smaller -- about
+    34 seconds thrown away per gigabyte. Sampling a couple of megabytes answers
+    the question for a fraction of a second.
+    """
+    import zlib
+
+    sample = bytearray()
+    for p in file_paths:
+        for root, _dirs, files in os.walk(p) if os.path.isdir(p) else [(None, None, None)]:
+            candidates = ([os.path.join(root, f) for f in files]
+                          if root is not None else [p])
+            for c in candidates:
+                try:
+                    with open(c, 'rb') as f:
+                        sample += f.read(sample_bytes - len(sample))
+                except OSError:
+                    continue
+                if len(sample) >= sample_bytes:
+                    break
+            if len(sample) >= sample_bytes:
+                break
+        if len(sample) >= sample_bytes:
+            break
+
+    if len(sample) < 65536:
+        return True          # too little to judge; compressing is cheap anyway
+    ratio = len(zlib.compress(bytes(sample), 1)) / len(sample)
+    return ratio < 0.95
+
+
+def create_archive(file_paths: list, progress=None) -> bytes:
+    """Pack the inputs into a tar, compressed only when that helps."""
+    compress = _looks_compressible(file_paths)
+    if progress:
+        progress('Creating archive'
+                 + (' (compressing)...' if compress else
+                    ' (already incompressible, skipping gzip)...'))
+
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode='w:gz', compresslevel=1) as tar:
-        for p in paths:
+    mode = 'w:gz' if compress else 'w'
+    kw = {'compresslevel': 1} if compress else {}
+    with tarfile.open(fileobj=buf, mode=mode, **kw) as tar:
+        for p in file_paths:
             p = Path(p)
             tar.add(str(p), arcname=p.name, recursive=True)
     return buf.getvalue()
@@ -260,7 +305,7 @@ def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
     total_samples = int(total_frames / FPS * sr)
     has_audio = _ac.max_payload_bytes(total_samples) >= len(header_raw)
 
-    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    exe = paths.ffmpeg_exe()
 
     if has_audio:
         log('Encoding video + audio in a single pass...')

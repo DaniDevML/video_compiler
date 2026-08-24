@@ -136,7 +136,9 @@ def build():
             for label, extra in [('GCC + OpenMP', ['-fopenmp', *static]),
                                  ('GCC', static),
                                  ('GCC (shared runtime)', [])]:
-                ok, err = _run([gcc, '-O3', '-march=native', '-shared', *extra,
+                arch = ([] if os.environ.get('VIDCOMPILER_PORTABLE')
+                        else ['-march=native'])
+                ok, err = _run([gcc, '-O3', *arch, '-shared', *extra,
                                 '-o', _OUT, *_SRCS])
                 if ok and os.path.exists(_OUT) and _loadable(_OUT):
                     print(f'[native] Built with {label} -> {_OUT}')
@@ -144,7 +146,13 @@ def build():
                 print(f'[native] {label} failed: {err[:200] or "not loadable"}')
 
     else:  # Linux / macOS
-        base = ['-O3', '-march=native', '-shared', '-fPIC']
+        # -march=native bakes in the build machine's instruction set, which
+        # is wrong for anything meant to be shared (a container image, a
+        # release binary). VIDCOMPILER_PORTABLE swaps it for a generic
+        # baseline that still gets the optimiser and OpenMP.
+        arch = ([] if os.environ.get('VIDCOMPILER_PORTABLE')
+                else ['-march=native'])
+        base = ['-O3', *arch, '-mtune=generic', '-shared', '-fPIC']
         for compiler in ('gcc', 'clang'):
             exe = shutil.which(compiler)
             if not exe:

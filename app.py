@@ -103,7 +103,7 @@ def _encode_worker(job_id: str, file_paths: list, title: str):
     try:
         import shards
         from video_encoder import create_archive
-        from youtube_api import upload_video
+        import youtube_api as yt
 
         progress('Creating archive...')
         archive = create_archive(file_paths)
@@ -112,50 +112,73 @@ def _encode_worker(job_id: str, file_paths: list, title: str):
                  f'{n} video{"s" if n > 1 else ""}.')
 
         out_dir = tempfile.mkdtemp(prefix='enc_')
+
         def enc_progress(msg):
-            # Frame counters from several concurrent encodes are pure noise;
-            # the milestones around them are worth showing.
+            # Frame counters from several concurrent encodes are noise; the
+            # milestones around them are worth showing.
             if n > 1 and 'frame ' in msg:
                 return
             progress(msg)
 
-        jobs = shards.encode_bytes_to_shards(
-            archive, out_dir, n_shards=n, progress=enc_progress,
-            max_workers=n)
-        videos = [j['path'] for j in jobs]
-        if n > 1:
-            progress(f'Encoded {n} videos, '
-                     f'{sum(j["bytes"] for j in jobs):,} bytes total.')
-
-        # Uploads run concurrently: YouTube throttles each stream rather than
-        # the connection, so several at once measured 2.14x the throughput of
-        # one. With a single video this is just a direct call.
-        def send(j):
-            part = (f' ({j["index"] + 1}/{n})' if n > 1 else '')
-            vid, url = upload_video(
-                j['path'],
-                title=title if n == 1 else f'{title} [{j["index"] + 1}/{n}]',
-                progress=(lambda m: progress(f'{m}{part}')) if n == 1 else None)
-            progress(f'Uploaded video {j["index"] + 1} of {n}.')
-            return dict(index=j['index'], url=url, video_id=vid)
+        def send(job):
+            vid, url = yt.upload_video(
+                job['path'],
+                title=title if n == 1 else f'{title} [{job["index"] + 1}/{n}]',
+                progress=progress if n == 1 else None)
+            progress(f'Uploaded video {job["index"] + 1} of {n}.')
+            return dict(index=job['index'], url=url, video_id=vid)
 
         if n == 1:
+            jobs = shards.encode_bytes_to_shards(
+                archive, out_dir, n_shards=1, progress=enc_progress,
+                max_workers=1)
+            videos = [j['path'] for j in jobs]
             results = [send(jobs[0])]
         else:
-            progress(f'Uploading {n} videos in parallel...')
-            with ThreadPoolExecutor(max_workers=n) as ex:
-                results = list(ex.map(send, jobs))
+            # Upload each shard the moment it finishes encoding, rather than
+            # waiting for every encode to finish first. Uploading dominates,
+            # so starting the first one ~25 s in instead of ~95 s in takes
+            # that time off the total outright.
+            progress(f'Encoding and uploading {n} videos in parallel...')
+            results = []
+            with ThreadPoolExecutor(max_workers=n) as up_pool:
+                pending = []
+                for job in shards.iter_encoded_shards(
+                        archive, out_dir, n_shards=n, progress=enc_progress,
+                        max_workers=min(n, shards.encode_workers())):
+                    videos.append(job['path'])
+                    progress(f'Encoded video {job["index"] + 1} of {n}; '
+                             f'upload started.')
+                    pending.append(up_pool.submit(send, job))
+                results = [f.result() for f in pending]
+
         uploaded = True
         results.sort(key=lambda r: r['index'])
-
         urls = [r['url'] for r in results]
+        video_ids = [r['video_id'] for r in results]
+
+        # A single link beats a list of links the user must not lose. The
+        # playlist also records the order, which is what the decoder needs.
+        playlist = None
         if n > 1:
-            progress('All videos uploaded. Every URL below is needed to '
-                     'decode -- keep them together.')
-        _job_done(job_id, url=urls[0], urls=urls,
-                  video_id=results[0]['video_id'],
-                  video_ids=[r['video_id'] for r in results],
-                  shards=n)
+            try:
+                pid = yt.create_playlist(
+                    title,
+                    'Encoded data archive split across several videos. '
+                    'Paste this playlist link into VidCompiler to decode.',
+                    progress=progress)
+                for i, vid in enumerate(video_ids):
+                    yt.add_to_playlist(pid, vid, position=i)
+                playlist = yt.playlist_url(pid)
+                progress('Playlist created. This one link is all you need.')
+            except Exception as exc:
+                progress(f'Could not create a playlist ({exc.__class__.__name__}). '
+                         'Every video URL below is needed to decode - keep '
+                         'them together.')
+
+        _job_done(job_id, url=playlist or urls[0], urls=urls,
+                  playlist=playlist, video_id=video_ids[0],
+                  video_ids=video_ids, shards=n)
 
     except Exception as exc:
         if not uploaded:
@@ -188,7 +211,12 @@ def _decode_worker(job_id: str, urls: list):
     tmp_dir = None
     try:
         import shards
+        import youtube_api as yt
         from youtube_api import download_video, fetch_description
+
+        # A playlist link stands in for the whole set, in order.
+        if len(urls) == 1 and yt.is_playlist_url(urls[0]):
+            urls = yt.expand_playlist(urls[0], progress=progress)
 
         n = len(urls)
         tmp_dir = tempfile.mkdtemp(prefix='dec_')

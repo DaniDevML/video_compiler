@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 import numpy as np
 import imageio_ffmpeg
 
+import paths
+
 from video_codec import (
     BLOCK_SIZE, FRAME_WIDTH, FRAME_HEIGHT,
     BITS_PER_FRAME, BYTES_PER_FRAME,
@@ -219,7 +221,7 @@ def _build_decode_cmd(video_path: str, pix_fmt: str, output: str = 'pipe:1',
     hwaccel against 250 fps on the CPU, and 12 fps for hwaccel without a filter
     to force the download path). See bench/bench_decode_cmd.py.
     """
-    exe  = imageio_ffmpeg.get_ffmpeg_exe()
+    exe  = paths.ffmpeg_exe()
     tail = []
     if max_frames:
         tail += ['-frames:v', str(max_frames)]
@@ -234,7 +236,7 @@ def probe_video(video_path: str) -> tuple:
     if video_path in _SIZE_CACHE:
         return _SIZE_CACHE[video_path]
     import re
-    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    exe = paths.ffmpeg_exe()
     kw  = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if sys.platform == 'win32':
         kw['creationflags'] = subprocess.CREATE_NO_WINDOW
@@ -384,7 +386,7 @@ def header_from_audio(media_path: str) -> dict | None:
     """
     import audio_codec as _ac
 
-    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    exe = paths.ffmpeg_exe()
     tmp = tempfile.mktemp(suffix='.raw')
     try:
         kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -638,7 +640,9 @@ def _recover_payload(header: dict, encoded_bytes: bytes, log) -> bytes:
 def _extract_archive(archive_bytes: bytes, output_dir: str, log) -> list:
     log('Extracting files...')
     os.makedirs(output_dir, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode='r:gz') as tar:
+    # 'r:*' rather than 'r:gz': the archive is only gzipped when that
+    # actually shrinks it, so both forms have to decode.
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode='r:*') as tar:
         tar.extractall(output_dir)
         names = tar.getnames()
     log(f'Done! Extracted {len(names)} item(s).')

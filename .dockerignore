@@ -1,0 +1,31 @@
+# Build output and caches
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+
+# Native artefacts: rebuilt inside the image for the target platform
+native/*.so
+native/*.dll
+native/*.obj
+
+# Working data and results, none of which belong in an image
+.scratch/
+bench_scratch/
+bench/*.json
+bench/*.out
+bench/frame_ops_v4.*
+
+# Credentials must never be baked into a shareable image
+client_secrets.json
+client_secret*.json
+yt_token.pickle*
+*.pickle
+
+# Repo furniture
+.git/
+.github/
+.claude/
+*.md
+!README.md

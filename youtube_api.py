@@ -10,7 +10,13 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+# youtube.upload is enough to publish a video, but not to create a playlist or
+# add items to one -- those need the broader manage scope. Both are requested so
+# a single consent covers the whole flow; if only the narrow one was granted
+# previously, the app falls back to handing back individual video links.
+SCOPE_UPLOAD = 'https://www.googleapis.com/auth/youtube.upload'
+SCOPE_MANAGE = 'https://www.googleapis.com/auth/youtube'
+SCOPES = [SCOPE_UPLOAD, SCOPE_MANAGE]
 # Credentials belong to the user and must outlive the process. In a frozen
 # build __file__ points inside the unpack directory, which is deleted on exit,
 # so anything written there would vanish.
@@ -20,13 +26,36 @@ TOKEN_FILE = _data('yt_token.pickle')
 CLIENT_SECRETS_FILE = _data('client_secrets.json')
 
 
-def get_youtube_service():
-    """Return an authenticated YouTube API service object."""
+def token_scopes() -> list:
+    """Scopes the saved token actually carries, if there is one."""
+    try:
+        with open(TOKEN_FILE, 'rb') as f:
+            return list(pickle.load(f).scopes or [])
+    except Exception:
+        return []
+
+
+def can_manage_playlists() -> bool:
+    """Whether the saved token is allowed to create playlists."""
+    return SCOPE_MANAGE in token_scopes()
+
+
+def get_youtube_service(require_manage: bool = False):
+    """Return an authenticated YouTube API service object.
+
+    `require_manage` forces re-consent when the saved token only carries the
+    upload scope, which is what a token issued before playlist support looks
+    like. Re-consent opens a browser, so it is only demanded when the caller
+    genuinely needs the wider permission.
+    """
     creds = None
 
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, 'rb') as f:
             creds = pickle.load(f)
+
+    if creds and require_manage and SCOPE_MANAGE not in (creds.scopes or []):
+        creds = None          # force the consent screen
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -298,3 +327,100 @@ def download_video(url: str, output_path: str, progress=None) -> str:
     shutil.move(downloaded, output_path)
     log('Video downloaded successfully.')
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# Playlists
+# ---------------------------------------------------------------------------
+#
+# An archive split across several videos otherwise leaves the user holding a
+# list of URLs, every one of which is required -- lose one and the archive is
+# gone. A playlist collapses that to a single link that also records the order,
+# which is exactly the information the decoder needs.
+
+_PLAYLIST_RE = re.compile(r'[?&]list=([A-Za-z0-9_-]{10,})')
+
+
+def is_playlist_url(url: str) -> bool:
+    """Whether this looks like a link to a playlist rather than one video."""
+    return bool(_PLAYLIST_RE.search(url or ''))
+
+
+def extract_playlist_id(url: str) -> str:
+    m = _PLAYLIST_RE.search(url or '')
+    if m:
+        return m.group(1)
+    if re.fullmatch(r'(PL|UU|LL|FL|OL)[A-Za-z0-9_-]{10,}', (url or '').strip()):
+        return url.strip()
+    raise ValueError('That does not look like a YouTube playlist link.')
+
+
+def playlist_url(playlist_id: str) -> str:
+    return f'https://www.youtube.com/playlist?list={playlist_id}'
+
+
+def create_playlist(title: str, description: str = '',
+                    progress=None) -> str:
+    """Create an unlisted playlist and return its id."""
+    def log(msg):
+        if progress:
+            progress(msg)
+
+    youtube = get_youtube_service(require_manage=True)
+    log('Creating playlist...')
+    resp = youtube.playlists().insert(
+        part='snippet,status',
+        body={
+            'snippet': {'title': title, 'description': description},
+            'status': {'privacyStatus': 'unlisted'},
+        },
+    ).execute()
+    return resp['id']
+
+
+def add_to_playlist(playlist_id: str, video_id: str, position: int = None):
+    """Append a video to a playlist, optionally at a fixed position."""
+    youtube = get_youtube_service(require_manage=True)
+    snippet = {
+        'playlistId': playlist_id,
+        'resourceId': {'kind': 'youtube#video', 'videoId': video_id},
+    }
+    if position is not None:
+        snippet['position'] = position
+    return youtube.playlistItems().insert(
+        part='snippet', body={'snippet': snippet}).execute()
+
+
+def expand_playlist(url: str, progress=None) -> list:
+    """Every video URL in a playlist, in order.
+
+    Read with yt-dlp rather than the Data API: a playlist that is unlisted is
+    still readable by link, so decoding needs no credentials at all. Requiring
+    OAuth to *read* something the link already grants would be a poor trade.
+    """
+    def log(msg):
+        if progress:
+            progress(msg)
+
+    pid = extract_playlist_id(url)
+    log('Reading playlist...')
+    # extract_flat keeps this to one metadata request instead of one per video,
+    # and noplaylist must be off or yt-dlp resolves the link to a single entry.
+    with _ydl({'extract_flat': 'in_playlist',
+               'skip_download': True,
+               'noplaylist': False}) as ydl:
+        info = ydl.extract_info(playlist_url(pid), download=False) or {}
+
+    urls = []
+    for entry in info.get('entries') or []:
+        if not entry:
+            continue
+        vid = entry.get('id')
+        if vid:
+            urls.append(f'https://www.youtube.com/watch?v={vid}')
+    if not urls:
+        raise RuntimeError(
+            'That playlist appears to be empty, or is private. A playlist '
+            'holding an archive must be public or unlisted to be readable.')
+    log(f'Playlist holds {len(urls)} video(s).')
+    return urls

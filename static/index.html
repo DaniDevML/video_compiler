@@ -357,6 +357,10 @@
     <div id="enc-urls"></div>
     <button class="copy-btn" id="enc-copy-all" onclick="copyAllUrls(this)"
             style="margin-top:10px;">Copy all</button>
+    <div class="info-pill" id="enc-playlist-note" style="display:none;">
+      Split across several videos and collected into one playlist — this single
+      link is all you need to decode.
+    </div>
     <div class="info-pill" id="enc-shard-note" style="display:none;color:var(--yellow);border-color:rgba(251,191,36,0.25);background:rgba(251,191,36,0.08);">
       This archive is split across several videos. <strong>All of them are
       needed to decode</strong> — keep every URL together.
@@ -375,9 +379,9 @@
 <div id="panel-decode" class="panel">
 
   <div class="card">
-    <label class="field-label">YouTube URL or Video ID</label>
+    <label class="field-label">YouTube link — video, playlist, or video ID</label>
     <textarea id="dec-url" rows="3" oninput="onUrlInput()"
-      placeholder="https://www.youtube.com/watch?v=...&#10;&#10;If the archive was split across several videos, paste every URL — one per line."
+      placeholder="https://www.youtube.com/watch?v=...&#10;or a playlist link:  https://www.youtube.com/playlist?list=...&#10;&#10;A playlist link is enough on its own. Otherwise paste every video URL, one per line."
       style="width:100%;resize:vertical;font-family:inherit;font-size:inherit;"></textarea>
     <div class="info-pill" id="dec-count" style="display:none;"></div>
   </div>
@@ -594,35 +598,57 @@ function onEncodeDone(data) {
   setEncBusy(false);
   const urls = data.urls && data.urls.length ? data.urls : (data.url ? [data.url] : []);
   if (!urls.length) return;
-  lastEncodeUrls = urls;
 
   const box = document.getElementById('enc-urls');
   box.innerHTML = '';
-  urls.forEach((u, i) => {
-    const row = document.createElement('div');
-    row.className = 'url-display';
-    if (urls.length > 1) {
-      const tag = document.createElement('span');
-      tag.textContent = `${i + 1}/${urls.length}`;
-      tag.style.cssText = 'opacity:.6;margin-right:8px;font-variant-numeric:tabular-nums;';
-      row.appendChild(tag);
-    }
-    const a = document.createElement('a');
-    a.href = u; a.target = '_blank'; a.textContent = u;
-    row.appendChild(a);
-    const btn = document.createElement('button');
-    btn.className = 'copy-btn';
-    btn.textContent = 'Copy';
-    btn.onclick = () => copyText(u, btn);
-    row.appendChild(btn);
-    box.appendChild(row);
-  });
 
-  document.getElementById('enc-copy-all').style.display =
-    urls.length > 1 ? '' : 'none';
-  document.getElementById('enc-shard-note').style.display =
-    urls.length > 1 ? '' : 'none';
+  // A playlist collapses the whole set to one link that also records the
+  // order, so show that alone and keep the individual videos tucked away.
+  if (data.playlist) {
+    lastEncodeUrls = [data.playlist];
+    box.appendChild(urlRow(data.playlist, null, 0));
+
+    const det = document.createElement('details');
+    det.style.marginTop = '10px';
+    const sum = document.createElement('summary');
+    sum.textContent = `${urls.length} videos in this playlist`;
+    sum.style.cssText = 'cursor:pointer;opacity:.7;font-size:.9em;';
+    det.appendChild(sum);
+    urls.forEach((u, i) => det.appendChild(urlRow(u, urls.length, i)));
+    box.appendChild(det);
+  } else {
+    lastEncodeUrls = urls;
+    urls.forEach((u, i) => box.appendChild(urlRow(u, urls.length > 1 ? urls.length : null, i)));
+  }
+
+  const many = !data.playlist && urls.length > 1;
+  document.getElementById('enc-copy-all').style.display = many ? '' : 'none';
+  document.getElementById('enc-shard-note').style.display = many ? '' : 'none';
+
+  const pl = document.getElementById('enc-playlist-note');
+  if (pl) pl.style.display = data.playlist ? '' : 'none';
+
   document.getElementById('enc-result').classList.add('visible');
+}
+
+function urlRow(url, total, i) {
+  const row = document.createElement('div');
+  row.className = 'url-display';
+  if (total) {
+    const tag = document.createElement('span');
+    tag.textContent = `${i + 1}/${total}`;
+    tag.style.cssText = 'opacity:.6;margin-right:8px;font-variant-numeric:tabular-nums;';
+    row.appendChild(tag);
+  }
+  const a = document.createElement('a');
+  a.href = url; a.target = '_blank'; a.textContent = url;
+  row.appendChild(a);
+  const btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.textContent = 'Copy';
+  btn.onclick = () => copyText(url, btn);
+  row.appendChild(btn);
+  return row;
 }
 
 function copyAllUrls(btn) {
@@ -646,7 +672,11 @@ function onUrlInput() {
   const urls = decodeUrls();
   document.getElementById('dec-btn').disabled = !urls.length;
   const note = document.getElementById('dec-count');
-  if (urls.length > 1) {
+  const isPlaylist = urls.length === 1 && /[?&]list=/.test(urls[0]);
+  if (isPlaylist) {
+    note.textContent = 'Playlist link — every video in it will be fetched and decoded in parallel.';
+    note.style.display = '';
+  } else if (urls.length > 1) {
     note.textContent = `${urls.length} videos — they will be downloaded and decoded in parallel.`;
     note.style.display = '';
   } else {

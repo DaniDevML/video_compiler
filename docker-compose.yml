@@ -1,0 +1,25 @@
+# docker compose up
+#
+# Put client_secrets.json in ./data before first use; the OAuth token and all
+# scratch space live there too. A job needs roughly 7x the payload free in that
+# directory.
+
+services:
+  vidcompiler:
+    build: .
+    image: vidcompiler:latest
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    # Uncomment to use an NVIDIA GPU, where the host has one and the NVIDIA
+    # container runtime is installed. Without it the image encodes in software,
+    # which is slower but produces an identical payload.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]

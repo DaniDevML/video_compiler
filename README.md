@@ -13,6 +13,7 @@
   <img src="https://img.shields.io/badge/ECC-Reed--Solomon-orange" alt="Reed-Solomon">
   <img src="https://img.shields.io/badge/pixel%20engine-C%20native-red" alt="C native">
   <img src="https://img.shields.io/badge/upload-2.14x%20parallel-0E7490" alt="Parallel upload">
+  <img src="https://img.shields.io/badge/docker-portable-2496ED?logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey" alt="GPL-3.0 License">
 </p>
 
@@ -24,23 +25,19 @@
 |---|---|
 | `dev` | the original v4 codec |
 | `v5-max-throughput` | the v5 format and the single-video pipeline |
-| **`v6-parallel`** (this one) | v5 plus sharding across parallel videos and the M-ary audio channel |
+| `v6-parallel` | v5 plus sharding across parallel videos |
+| **`v7-playlists`** (this one) | v6 plus playlists, Docker, and a faster archive stage |
 
-This branch is v5 with parallelism on top. **The frame format is unchanged** —
-everything under *The v5 format* below applies identically, and a video encoded
-on either branch decodes on both.
+The frame format has not changed since v5 — a video encoded on any of these
+branches decodes on all of them. What v6 and v7 add is everything around it.
 
-What v6 adds is concurrency across videos. Upload dominates end-to-end time at
-any real size, and a single HTTP stream does not saturate the link: three
-concurrent uploads measured **39.9 Mbit/s against 18.6** for one. Sharding also
-lifts the per-video ceiling, which YouTube's 15-minute duration limit puts at
-about 1.27 GB.
+v7 adds three things:
 
-The audio channel moves from binary FSK to 4-FSK on this branch, 2.9x faster,
-though at 0.04% of total capacity that matters for redundancy rather than
-throughput.
-
----
+- **One link instead of many.** A split archive is collected into a YouTube
+  playlist, and the decoder takes that playlist link on its own.
+- **Docker.** A portable image that runs anywhere, with no CUDA assumption.
+- **A faster archive stage.** gzip is skipped when it cannot help, which is
+  6x faster on incompressible input.
 
 ## How It Works
 
@@ -83,33 +80,47 @@ To run from source instead:
 
 ## Quick Start
 
-Download `VidCompiler.exe` and double-click it. It starts the server, opens
-your browser at the app, and prints the address in case it does not.
+### Docker (any machine)
 
-Put your `client_secrets.json` beside the executable before first use. The app
-writes `yt_token.pickle` and a `.scratch` working folder there too — never
-inside the bundle, which a one-file build deletes on exit.
+```bash
+docker build -t vidcompiler .
+```
 
-> First launch takes about a minute: Reed-Solomon kernels are compiled on
-> first use. The page is already up while that happens, and the cache is
-> reused from then on.
+```bash
+docker run --rm -p 5000:5000 -v vidcompiler-data:/data vidcompiler
+```
 
-### Building the executable
+Open <http://localhost:5000>. Put `client_secrets.json` in the mounted volume
+before first use; the OAuth token and all scratch space live there too.
+
+The image deliberately does **not** depend on CUDA or NVENC. Those need the
+host's driver and the NVIDIA container runtime, which is precisely the
+assumption that stops an image being shareable — so it encodes in software and
+runs anywhere. Where a GPU *is* available, pass it through and the encoder
+probe finds it on its own:
+
+```bash
+docker run --rm --gpus all -p 5000:5000 -v vidcompiler-data:/data vidcompiler
+```
+
+Software encoding is slower than NVENC; the payload is identical either way.
+
+> A job needs roughly **7x the payload** free in the mounted volume — the
+> uploaded copy, the ~3x encoded video, and the downloaded copy.
+
+### Windows executable
+
+Double-click `VidCompiler.exe`. It starts the server, opens your browser, and
+prints the address as a fallback. Put `client_secrets.json` beside it.
 
 ```bash
 python build_exe.py
 ```
 
-Produces `dist/VidCompiler.exe` (~143 MB — it carries Python, ffmpeg, numba
-and the native library). The build compiles `native/frame_ops.dll` first if it
-is missing, so the executable ships with the fast paths rather than the NumPy
-fallback.
+Produces `dist/VidCompiler.exe` (~143 MB — it carries Python, ffmpeg, numba and
+the native library).
 
-Scratch space is the thing to watch: a job needs roughly **7x the payload**
-free on whichever drive holds the executable — the uploaded copy, the ~3x
-encoded video, and the downloaded copy. Set `VIDCOMPILER_SCRATCH` to move it.
-
-### Running from source instead
+### From source
 
 ```bash
 pip install -r requirements.txt
@@ -123,8 +134,8 @@ python native/build.py
 python launcher.py
 ```
 
-`launcher.py` is the same entry point the executable runs. `python app.py`
-still works if you want Flask's development server.
+> First launch takes about a minute either way: galois compiles its
+> Reed-Solomon kernels on first use. The page is up while that happens.
 
 ## Usage
 
@@ -133,12 +144,12 @@ still works if you want Flask's development server.
 1. Drop any files or folders onto the drop zone.
 2. Optionally set a video title.
 3. Click **Encode & Upload to YouTube**.
-4. Copy the returned URL — or all of them, if it was split across several videos. Every one is needed to decode.
+4. Copy the returned link. A split archive gives you a single playlist link that is all you need.
 
 ### Decode
 
 1. Switch to the **Decode from URL** tab.
-2. Paste the YouTube URL or video ID. If the archive was split across several videos, paste every URL, one per line — all of them are needed.
+2. Paste the link. One playlist link is enough for a split archive; otherwise paste every video URL, one per line.
 3. Click **Download & Decode**.
 4. Download the recovered files as a `.zip`.
 
@@ -159,6 +170,8 @@ video_compiler/
 │   ├── build.py        # Auto-detect compiler and build DLL/.so
 │   └── __init__.py     # ctypes loader with fallback detection
 ├── launcher.py         # One entry point: serve, open the browser, stay up
+├── Dockerfile          # Portable image, no CUDA assumption
+├── docker-compose.yml  # docker compose up
 ├── paths.py            # Resource vs user-data paths, frozen or from source
 ├── shards.py           # Split an archive across parallel videos
 ├── build_exe.py        # Build dist/VidCompiler.exe
@@ -578,6 +591,56 @@ is now modulated separately.
 Scale, honestly: 652 B/s against the pixel channel's 1.68 MB/s is **0.04% of
 total capacity**. The audio channel's value is redundancy — it carries a backup
 header — not throughput.
+
+---
+
+# v7: one link, not many
+
+An archive split across several videos used to leave you holding a list of
+URLs, **every one of which is required** — lose one and the archive is gone.
+v7 collects them into an unlisted YouTube playlist and hands back a single
+link. The playlist also records the order, which is exactly what the decoder
+needs, so pasting that one link is enough:
+
+```
+https://www.youtube.com/playlist?list=PLcu_a8cy1Xns
+```
+
+Decoding reads the playlist with yt-dlp rather than the Data API, so it needs
+no credentials at all — an unlisted playlist is readable by link, and requiring
+OAuth to read something the link already grants would be a poor trade.
+
+**Encoding a playlist does need a wider permission** than uploading: the
+`youtube` scope rather than `youtube.upload` alone. The first run after
+upgrading asks for it. If only the narrower grant is available the upload still
+succeeds and the individual video links are returned instead, with a warning
+that all of them are needed.
+
+Verified without spending an upload — creating a playlist costs a fraction of
+what a video does, so `bench/test_playlist.py` builds one from videos already
+on the channel, adds them **in reverse order**, reads it back by link, and
+checks the archive still reassembles byte-identically. The manifest sorts the
+order out.
+
+## Faster archiving
+
+gzip on incompressible input is pure loss: it costs time and produces a file no
+smaller. The archive stage now samples a couple of megabytes first and skips
+compression when it will not help.
+
+| input | before | after |
+|---|---|---|
+| incompressible, 128 MB | 31.9 MB/s | **190.9 MB/s** |
+| compressible, 128 MB | — | 397 MB/s, archive 0.5% of input |
+
+About 28 seconds off a gigabyte. Compressible input is unaffected — it still
+compresses, and the decoder accepts either form.
+
+## Uploads start before encoding finishes
+
+Encoding used to complete for every shard before the first upload began.
+Uploads now start the moment each shard is encoded, so the first one begins
+roughly 25 seconds in rather than 95.
 
 ---
 
