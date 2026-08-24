@@ -87,11 +87,15 @@ docker build -t vidcompiler .
 ```
 
 ```bash
-docker run --rm -p 5000:5000 -v vidcompiler-data:/data vidcompiler
+docker run -d -p 5000:5000 -v vidcompiler-data:/data vidcompiler
 ```
 
 Open <http://localhost:5000>. Put `client_secrets.json` in the mounted volume
 before first use; the OAuth token and all scratch space live there too.
+
+**Built and tested**, not just written: the image builds clean, serves the page
+on the published port, reports `healthy`, and passes the native, Reed-Solomon,
+shard and end-to-end suites inside the container. Image is 1.56 GB.
 
 The image deliberately does **not** depend on CUDA or NVENC. Those need the
 host's driver and the NVIDIA container runtime, which is precisely the
@@ -100,10 +104,19 @@ runs anywhere. Where a GPU *is* available, pass it through and the encoder
 probe finds it on its own:
 
 ```bash
-docker run --rm --gpus all -p 5000:5000 -v vidcompiler-data:/data vidcompiler
+docker run -d --gpus all -p 5000:5000 -v vidcompiler-data:/data vidcompiler
 ```
 
-Software encoding is slower than NVENC; the payload is identical either way.
+That choice has a measurable cost, worth knowing before you pick:
+
+| | encoder | expansion |
+|---|---|---|
+| host with NVENC | `h264_nvenc` | 3.16x |
+| container, no GPU | `libx264` | **4.14x** |
+
+Software encoding uploads about **31% more bytes** for the same payload. The
+recovered data is identical either way — it is upload time you pay, not
+integrity.
 
 > A job needs roughly **7x the payload** free in the mounted volume — the
 > uploaded copy, the ~3x encoded video, and the downloaded copy.

@@ -39,6 +39,10 @@
 #else
   #define EXPORT __attribute__((visibility("default")))
   #include <stdint.h>
+  /* size_t lives in stddef.h, not stdint.h. The Windows branch above declares
+     it by hand, which hid this: the file only ever failed to compile on a
+     toolchain that did not, i.e. every non-Windows build. */
+  #include <stddef.h>
 #endif
 
 #ifdef _OPENMP
