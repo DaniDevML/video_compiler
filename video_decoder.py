@@ -28,6 +28,7 @@ from video_codec import (
     HEADER_SIZE, HEADER_REPEAT,
     MAGIC, MAGIC_V3, MAGIC_V2,
     MAGIC_V4, MAGIC_V8,
+    HEADER_SIZE, HEADER_SIZE_V8, HEADER_SIZE_V3, HEADER_SIZE_V2,
     unpack_header, bits_to_bytes, decode_sidecar,
     yuv_frames_to_bits, yuv_frames_to_packed,
     check_sync_yuv, yuv_frame_to_header, profile_from_header,
@@ -379,12 +380,12 @@ def decode_video_to_files(video_path: str, output_dir: str, progress=None,
 _DETECT_FRAMES = 16
 
 
-def header_from_audio(media_path: str) -> dict | None:
-    """Recover the header from the FSK audio track, if the file has one.
+def raw_from_audio(media_path: str) -> bytes | None:
+    """Everything the FSK audio track carries, or None.
 
-    The encoder has always written this backup copy, but nothing read it.
-    It is the last fallback: used only when the description sidecar is absent
-    and no header frame could be found in the pixels.
+    The track always starts with a copy of the header. From v8 it continues
+    with payload, so this returns the whole thing and the callers take the
+    part they want.
     """
     import audio_codec as _ac
 
@@ -405,12 +406,51 @@ def header_from_audio(media_path: str) -> dict | None:
         raw = _ac.decode_audio(pcm)
         if not raw or raw[:8] not in (MAGIC_V8, MAGIC, MAGIC_V3, MAGIC_V2):
             return None
-        return unpack_header(raw)
+        return raw
     except Exception:
         return None
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def header_from_audio(media_path: str) -> dict | None:
+    """Recover the header from the FSK audio track, if the file has one.
+
+    It is the last fallback: used only when the description sidecar is absent
+    and no header frame could be found in the pixels.
+    """
+    raw = raw_from_audio(media_path)
+    return unpack_header(raw) if raw else None
+
+
+def _header_len(magic: bytes) -> int:
+    """Bytes the header occupies at the front of the audio payload."""
+    return {MAGIC_V8: HEADER_SIZE_V8, MAGIC: HEADER_SIZE,
+            MAGIC_V3: HEADER_SIZE_V3, MAGIC_V2: HEADER_SIZE_V2}.get(
+                magic, HEADER_SIZE)
+
+
+def payload_from_audio(media_path: str, header: dict, want: int) -> bytes:
+    """The payload slice the audio track carries after the header copy.
+
+    Raises rather than returning short. From v8 these bytes are the only copy
+    -- the frames never carried them -- so a silent truncation here would show
+    up as a corrupt archive much later, with nothing pointing at the audio.
+    """
+    raw = raw_from_audio(media_path)
+    if raw is None:
+        raise RuntimeError(
+            f'this video carries {want:,} bytes of its payload in the audio '
+            f'track, and the track could not be read. The file is incomplete '
+            f'without it.')
+    off = _header_len(raw[:8])
+    got = raw[off:off + want]
+    if len(got) != want:
+        raise RuntimeError(
+            f'the audio track carries {len(got):,} payload bytes but the '
+            f'header says {want:,}. The track is truncated or damaged.')
+    return got
 
 
 def _detect_version(video_path: str, log):
@@ -537,8 +577,16 @@ def _decode_v3(video_path: str, header: dict, profile,
 
     _require_all_frames(frames_read, num_data_frames)
     log('Reconstructing bytes...')
-    encoded_bytes = (np.concatenate(byte_chunks).tobytes()[:header['encoded_size']]
+
+    # From v8 the tail of the coded stream travels in the audio track rather
+    # than the frames, so the frames hold only the first part of it.
+    audio_bytes  = header.get('audio_bytes') or 0
+    video_wanted = header['encoded_size'] - audio_bytes
+    encoded_bytes = (np.concatenate(byte_chunks).tobytes()[:video_wanted]
                      if byte_chunks else b'')
+    if audio_bytes:
+        log(f'Recovering {audio_bytes:,} payload bytes from the audio track...')
+        encoded_bytes += payload_from_audio(video_path, header, audio_bytes)
     return _finish_decode(header, encoded_bytes, output_dir, log)
 
 

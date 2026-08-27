@@ -25,7 +25,7 @@ import paths
 
 from video_codec import (
     BLOCK_SIZE, FRAME_WIDTH, FRAME_HEIGHT, YUV_FRAME_BYTES,
-    BITS_PER_FRAME, BYTES_PER_FRAME,
+    BITS_PER_FRAME, BYTES_PER_FRAME, HEADER_SIZE_V8,
     NROOTS, CHUNK_IN, FPS,
     HEADER_SIZE, HEADER_REPEAT,
     pack_header, bytes_to_bits, encode_sidecar,
@@ -253,8 +253,65 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
     return encode_bytes_to_video(archive, output_path, progress=progress)
 
 
+# Whether v8 profiles fill the audio track with payload rather than silence.
+#
+# Worth knowing before turning it on: the audio channel is about 0.04% of total
+# capacity, so this buys very little throughput. What it costs is that the
+# track stops being pure redundancy. Today a mangled audio track is harmless --
+# the header has two other copies. With payload in it, losing the track loses
+# data the frames never carried.
+AUDIO_PAYLOAD_DEFAULT = True
+
+
+def plan_audio_payload(encoded_size: int, bytes_per_frame: int,
+                       header_len: int, enabled: bool = True):
+    """How much of the payload the audio track can carry.
+
+    v7 and earlier put only a copy of the header in the audio and left the
+    rest of the track silent. v8 fills it with actual payload, so the audio
+    spans the whole video and the video needs correspondingly fewer frames.
+
+    This is a fixed point: audio capacity depends on the video's duration,
+    which depends on how many bytes the audio took. Iterating converges in a
+    couple of rounds and is safe to stop early -- taking *less* audio only
+    lengthens the video, which only increases capacity, so the final plan can
+    never ask the track to hold more than it can.
+
+    Returns (audio_bytes, num_data_frames, total_samples).
+    """
+    audio = 0
+    ndf = total_samples = 0
+    for _ in range(8):
+        video_bytes = encoded_size - audio
+        ndf = max(1, math.ceil(video_bytes / bytes_per_frame))
+        total_samples = int((1 + ndf) / FPS * _ac.SAMPLE_RATE)
+        if not enabled:
+            return 0, ndf, total_samples
+        cap = _ac.max_payload_bytes(total_samples)
+        # Leave the header copy in place: it is what lets a video whose frames
+        # are damaged still report its own parameters.
+        nxt = max(0, cap - header_len)
+        # Never let the audio empty the video.
+        nxt = min(nxt, max(0, encoded_size - bytes_per_frame))
+        if nxt == audio:
+            break
+        audio = nxt
+
+    video_bytes = encoded_size - audio
+    ndf = max(1, math.ceil(video_bytes / bytes_per_frame))
+    total_samples = int((1 + ndf) / FPS * _ac.SAMPLE_RATE)
+    cap = _ac.max_payload_bytes(total_samples)
+    if audio + header_len > cap:                 # belt and braces
+        audio = max(0, cap - header_len)
+        video_bytes = encoded_size - audio
+        ndf = max(1, math.ceil(video_bytes / bytes_per_frame))
+        total_samples = int((1 + ndf) / FPS * _ac.SAMPLE_RATE)
+    return audio, ndf, total_samples
+
+
 def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
-                          extra_sidecar: str = '', profile=None):
+                          extra_sidecar: str = '', profile=None,
+                          audio_payload: bool = None):
     """Write an arbitrary byte string to one video.
 
     Split out from encode_files_to_video so a shard -- a slice of a larger
@@ -265,9 +322,17 @@ def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
     `profile` selects the frame format. It defaults to the module default; the
     header records it, so a video encoded with any profile decodes without the
     reader being told which one.
+
+    `audio_payload` fills the audio track with real payload instead of leaving
+    it silent after the header copy. It defaults on for v8 profiles and off
+    otherwise, because it is not free: the audio stops being pure redundancy
+    and becomes load-bearing, so a track YouTube strips or mangles takes real
+    data with it. See AUDIO_PAYLOAD_DEFAULT.
     """
     prof = profile or DEFAULT_PROFILE
     bytes_per_frame = prof.bytes
+    if audio_payload is None:
+        audio_payload = AUDIO_PAYLOAD_DEFAULT and (prof.basen_y or prof.basen_c)
     def log(msg):
         if progress:
             progress(msg)
@@ -288,21 +353,34 @@ def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
     log(f'ECC encoded: {encoded_size:,} bytes  '
         f'({bytes_per_frame:,} bytes/frame, profile {prof.name}).')
 
-    num_data_frames = math.ceil(len(encoded) / bytes_per_frame)
+    header_len = (HEADER_SIZE_V8 if (prof.basen_y or prof.basen_c)
+                  else HEADER_SIZE)
+    audio_bytes, num_data_frames, total_audio_samples = plan_audio_payload(
+        encoded_size, bytes_per_frame, header_len, enabled=audio_payload)
+
+    # The audio takes the tail of the coded stream; the frames take the rest.
+    video_encoded = encoded[:encoded_size - audio_bytes] if audio_bytes else encoded
+    audio_slice   = encoded[encoded_size - audio_bytes:] if audio_bytes else b''
+
     # One zero-padded buffer covering every frame, with the slack the packed
     # bit reader needs past the end. Frames are cut from this without copying.
     frame_src = pad_for_packed(
-        encoded.ljust(num_data_frames * bytes_per_frame, b'\x00'))
+        video_encoded.ljust(num_data_frames * bytes_per_frame, b'\x00'))
 
-    total_frames        = 1 + num_data_frames
-    total_audio_samples = int(total_frames / FPS * _ac.SAMPLE_RATE)
-    audio_capacity      = _ac.max_payload_bytes(total_audio_samples)
-    log(f'Audio channel capacity: {audio_capacity:,} bytes '
-        f'(header copy embedded for decode robustness)')
+    total_frames   = 1 + num_data_frames
+    audio_capacity = _ac.max_payload_bytes(total_audio_samples)
+    if audio_bytes:
+        log(f'Audio channel: {audio_bytes:,} payload bytes carried '
+            f'({audio_bytes / encoded_size * 100:.3f}% of the coded stream), '
+            f'capacity {audio_capacity:,}')
+    else:
+        log(f'Audio channel capacity: {audio_capacity:,} bytes '
+            f'(header copy embedded for decode robustness)')
 
     # Header frame
     header_raw = pack_header(archive_size, num_data_frames, encoded_size,
-                             archive_crc, profile=prof)
+                             archive_crc, audio_bytes=audio_bytes, profile=prof)
+    assert len(header_raw) == header_len
     header_yuv = header_to_yuv_frame(header_raw)   # (YUV_FRAME_BYTES,) uint8
 
     codec, hw_params = _get_encoder()
@@ -311,13 +389,17 @@ def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
     # ── Pre-generate audio PCM while building the ffmpeg command ──
     sr = _ac.SAMPLE_RATE
     total_samples = int(total_frames / FPS * sr)
-    has_audio = _ac.max_payload_bytes(total_samples) >= len(header_raw)
+    has_audio = (_ac.max_payload_bytes(total_samples)
+                 >= len(header_raw) + len(audio_slice))
+    if audio_slice and not has_audio:
+        raise RuntimeError('audio payload planned but the track cannot hold it')
 
     exe = paths.ffmpeg_exe()
 
     if has_audio:
         log('Encoding video + audio in a single pass...')
-        audio_pcm = _ac.float32_to_s16(_ac.encode_audio(header_raw, total_samples))
+        audio_pcm = _ac.float32_to_s16(
+            _ac.encode_audio(header_raw + audio_slice, total_samples))
         # Write audio to a temp file (ffmpeg can't read two pipes simultaneously)
         import tempfile
         audio_tmp = tempfile.mktemp(suffix='.raw')

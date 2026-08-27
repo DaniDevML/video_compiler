@@ -1,0 +1,154 @@
+{
+  "runs": [
+    {
+      "mb": 10,
+      "payload_bytes": 10000000,
+      "archive_bytes": 10004480,
+      "formats": {
+        "v7": {
+          "bytes_per_frame": 56100,
+          "video_bytes": 31575148,
+          "expansion": 3.1575148,
+          "t_encode": 1.1626625000008062,
+          "t_decode": 1.5368875000003754,
+          "enc_mbps": 8.6009482545391,
+          "dec_mbps": 6.506657123567963,
+          "audio_payload_bytes": 0,
+          "videos_needed": 1,
+          "per_video_capacity": 1274262000,
+          "est_upload_s": 13.436233191489361,
+          "identical": true,
+          "ok": true
+        },
+        "v8": {
+          "bytes_per_frame": 166540,
+          "video_bytes": 55231579,
+          "expansion": 5.5231579,
+          "t_encode": 0.9444466000004468,
+          "t_decode": 1.3367685999983223,
+          "enc_mbps": 10.588211128077827,
+          "dec_mbps": 7.480726282778148,
+          "audio_payload_bytes": 1036,
+          "videos_needed": 1,
+          "per_video_capacity": 3782809152,
+          "est_upload_s": 23.502799574468085,
+          "identical": true,
+          "ok": true
+        }
+      }
+    },
+    {
+      "mb": 100,
+      "payload_bytes": 100000000,
+      "archive_bytes": 100003840,
+      "formats": {
+        "v7": {
+          "bytes_per_frame": 56100,
+          "video_bytes": 315502055,
+          "expansion": 3.15502055,
+          "t_encode": 6.417863799999395,
+          "t_decode": 11.295478800000637,
+          "enc_mbps": 15.58150860104096,
+          "dec_mbps": 8.853099702156438,
+          "audio_payload_bytes": 0,
+          "videos_needed": 1,
+          "per_video_capacity": 1274262000,
+          "est_upload_s": 134.25619361702127,
+          "identical": true,
+          "ok": true
+        },
+        "v8": {
+          "bytes_per_frame": 166540,
+          "video_bytes": 552199734,
+          "expansion": 5.52199734,
+          "t_encode": 5.6285217000004195,
+          "t_decode": 7.45167980000042,
+          "enc_mbps": 17.766654430770433,
+          "dec_mbps": 13.419792943866746,
+          "audio_payload_bytes": 15226,
+          "videos_needed": 1,
+          "per_video_capacity": 3782809152,
+          "est_upload_s": 234.97861021276594,
+          "identical": true,
+          "ok": true
+        }
+      }
+    },
+    {
+      "mb": 1000,
+      "payload_bytes": 1000000000,
+      "archive_bytes": 1000007680,
+      "formats": {
+        "v7": {
+          "bytes_per_frame": 56100,
+          "video_bytes": 3154905945,
+          "expansion": 3.154905945,
+          "t_encode": 71.47343350000119,
+          "t_decode": 106.5140046000015,
+          "enc_mbps": 13.991212553122738,
+          "dec_mbps": 9.388436795286786,
+          "audio_payload_bytes": 0,
+          "videos_needed": 1,
+          "per_video_capacity": 1274262000,
+          "est_upload_s": 1342.5131680851064,
+          "identical": true,
+          "ok": true
+        },
+        "v8": {
+          "bytes_per_frame": 166540,
+          "video_bytes": 5522005433,
+          "expansion": 5.522005433,
+          "t_encode": 52.99352360000012,
+          "t_decode": 78.76000289999865,
+          "enc_mbps": 18.870230399248218,
+          "dec_mbps": 12.696799938792498,
+          "audio_payload_bytes": 156911,
+          "videos_needed": 1,
+          "per_video_capacity": 3782809152,
+          "est_upload_s": 2349.789545957447,
+          "identical": true,
+          "ok": true
+        }
+      }
+    },
+    {
+      "mb": 3000,
+      "payload_bytes": 3000000000,
+      "archive_bytes": 3000002560,
+      "formats": {
+        "v7": {
+          "bytes_per_frame": 56100,
+          "video_bytes": 9465192083,
+          "expansion": 3.1550640276666666,
+          "t_encode": 215.98691130000043,
+          "t_decode": 333.1292953000011,
+          "enc_mbps": 13.889730548686234,
+          "dec_mbps": 9.00551240111842,
+          "audio_payload_bytes": 0,
+          "videos_needed": 3,
+          "per_video_capacity": 1274262000,
+          "est_upload_s": 4027.7413119148937,
+          "identical": true,
+          "ok": true
+        },
+        "v8": {
+          "bytes_per_frame": 166540,
+          "video_bytes": 16566198228,
+          "expansion": 5.522066076,
+          "t_encode": 159.53639380000095,
+          "t_decode": 278.5621231999994,
+          "enc_mbps": 18.80448672897094,
+          "dec_mbps": 10.7695905155278,
+          "audio_payload_bytes": 472101,
+          "videos_needed": 1,
+          "per_video_capacity": 3782809152,
+          "est_upload_s": 7049.446054468085,
+          "identical": true,
+          "ok": true
+        }
+      }
+    }
+  ],
+  "upload_mbit": 18.8,
+  "note": "local compute; upload time is an estimate"
+}

@@ -20,6 +20,8 @@ TESTS = [
     ('audio channel',          'test_audio.py'),
     ('audio header fallback',  'test_audio_fallback.py'),
     ('v4 backward compat',     'test_compat.py'),
+    ('base-N block codec',     'test_basen.py'),
+    ('v8 format end to end',   'test_v8.py'),
     ('encryption',             'test_crypto.py'),
     ('file explorer index',    'test_library.py'),
     ('file explorer API',      'test_explorer_api.py'),

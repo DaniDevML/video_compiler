@@ -4,7 +4,8 @@
     Cloud storage with no cloud storage bill — your files live inside
     YouTube videos.
     <br />
-    Encrypted before upload, browsable as an ordinary file manager.
+    v8: three levels per luma block instead of two, and a soundtrack that
+    carries your data.
   </p>
 </p>
 
@@ -17,10 +18,11 @@
   <img src="https://img.shields.io/badge/docker-portable-2496ED?logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/crypto-AES--256--GCM-16A34A" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/pipeline-5%20GB%20verified%20locally-0E7490" alt="5 GB verified locally">
+  <img src="https://img.shields.io/badge/v8-166%2C540%20B%2Fframe-7C3AED" alt="166,540 bytes per frame">
   <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey" alt="GPL-3.0 License">
 </p>
 
-**Contents** — [Branches](#branches) · [What each version can and cannot do](#what-each-version-can-and-cannot-do) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Usage](#usage) · [Technical specs](#technical-specs) · [Performance](#performance) · [The v5 format](#the-v5-format-and-why-v4-had-to-change) · [Parallel shards](#parallel-shards) · [v7: one link](#v7-one-link-not-many) · [The file explorer](#the-file-explorer) · [Encryption](#encryption) · [Scaling](#scaling-10-mb-to-5-gb-measured) · [Tests](#tests) · [License](#license)
+**Contents** — [Branches](#branches) · [What each version can and cannot do](#what-each-version-can-and-cannot-do) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Usage](#usage) · [Technical specs](#technical-specs) · [Performance](#performance) · [The v5 format](#the-v5-format-and-why-v4-had-to-change) · [Parallel shards](#parallel-shards) · [v7: one link](#v7-one-link-not-many) · [The file explorer](#the-file-explorer) · [Encryption](#encryption) · [v8: more levels, and a working soundtrack](#v8-more-levels-per-block-and-a-soundtrack-that-carries-data) · [v8 vs v7](#v8-against-v7-measured) · [Tests](#tests) · [License](#license)
 
 ---
 
@@ -980,6 +982,177 @@ plaintext archive, then extraction). It completed on a 32 GB machine with
 ~19 GB free. On 16 GB it would not, and `bench_sizes.py` records a
 `MemoryError` as a result rather than hiding it. Streaming the archive through
 a temporary file instead of a `bytes` object is the fix, and it is not done.
+
+---
+
+# v8: more levels per block, and a soundtrack that carries data
+
+Two changes, both aimed at getting more out of the same video.
+
+## The format could only count in powers of two
+
+Every version up to v7 described a block as *bits per block*. That is a
+severe restriction and it was never stated as one: a block can hold 2, 4, 8 or
+16 levels and nothing in between, because those are the only level counts a
+whole number of bits can address.
+
+It matters because the real cliff does not land on a power of two. Measuring
+luma at 2x2 blocks against real YouTube:
+
+| levels | spacing | bits/block | measured SER | |
+|---|---|---|---|---|
+| 2 | 255.0 | 1.000 | 0.0 | clean |
+| **3** | **127.5** | **1.585** | **2.7e-06** | **clean** |
+| 4 | 85.0 | 2.000 | 4.5e-02 | fails |
+
+Two levels works perfectly and four is unusable — a 4.5e-02 error rate is
+thousands of times past what the code can repair. The old format had to pick
+one of those. **Three levels is clean and carries 58.5% more than two**, and
+it was simply not expressible before.
+
+Chroma got the same treatment and refused it: every non-power-of-two rung
+tried on chroma failed, so chroma stays at 4 levels. The two planes really do
+behave differently, which is the finding v5 was built on and it still holds.
+
+### How it was measured
+
+One upload, video `fMINe--kLfo`, built as a ladder: each segment varies a
+single plane's level count while the other plane is pinned to a setting
+already measured clean, so a failure is attributable to the rung that caused
+it. `bench/probe_levels.py` reproduces it.
+
+The local transcode simulator was no help at all here, and that is worth
+recording. It destroys settings that real YouTube carries **bit-perfectly** —
+it reported a 0.22 symbol error rate for luma at 2 levels, which the real
+service delivers with zero errors. It is far harsher than the thing it
+models, so it is marked as screening-only and every decision here rests on
+the upload. This project already learned the opposite failure once, when v4
+passed every local test and lost 3.6e-02 of its luma bits on the real service.
+
+## Base-N packing, and why the groups are small
+
+Three levels per block means bytes have to become base-3 digits. A group of
+12 digits carries 19 bits, because 3^12 = 531,441 covers 2^19 = 524,288 —
+99.9% of the theoretical log2(3) per digit.
+
+Bigger groups are slightly more efficient and much more fragile. A corrupted
+digit changes the whole group *integer*, so it damages every byte the group
+touches; at 19 bits that is at most 3 bytes, comfortably inside what
+RS(255,215) repairs. At 58 bits it would be 8. The group size is an
+error-containment decision as much as a packing one, and
+`bench/test_basen.py` asserts the blast radius directly rather than trusting
+the reasoning.
+
+The geometry works out exactly, which is luck worth noting: 960 x 538 luma
+blocks is 516,480, which is 43,040 whole groups, and 43,040 x 19 bits is
+102,220 bytes on the nose. Every plane stays byte-aligned per frame, so the
+threaded encoder's guarantee that no two frames touch the same output byte
+survives untouched.
+
+**166,540 bytes per frame — 2.97x v7** — and the per-video ceiling rises from
+1.27 GB to **3.78 GB**, so a 3 GB file fits in one video where v7 needs three.
+
+## The audio track now carries payload
+
+Before v8 the audio held one copy of the header and then went silent for the
+rest of the video. It now continues with real payload, so the sound covers
+the whole file and those bytes are not in the frames at all.
+
+How much it is worth, honestly: **about 0.013% of the coded stream.** On a
+1 GB payload that is 132 KB out of a gigabyte. The audio channel runs at
+609 payload bytes/s against the pixel channel's 5 MB/s, and no amount of
+cleverness in the modulation changes that ratio by an order of magnitude.
+
+There is a second effect that pulls the wrong way, and it is a direct
+consequence of the other half of v8: **denser frames make the video shorter,
+and a shorter video has less audio.** For the same 60 MB payload the track
+holds 27,520 bytes under v7 and 8,815 under v8. Maximising pixel density and
+maximising audio capacity are in tension.
+
+### What it costs
+
+This is the part to weigh. Until v8 the audio was pure redundancy, and losing
+it cost nothing — the header has two other copies. Now those bytes exist
+nowhere else. A track that YouTube strips or mangles takes real data with it.
+
+The decoder is built to be loud about that rather than quietly returning a
+short archive: if the header says bytes are in the track and the track cannot
+be read, it raises and names the reason. `bench/test_v8.py` strips the audio
+from a finished video and requires the error.
+
+It is a switch. `audio_payload=False` restores the v7 behaviour, and
+`AUDIO_PAYLOAD_DEFAULT` turns it off globally. Given it buys 0.013% and makes
+a redundant channel load-bearing, that switch exists for a reason.
+
+---
+
+# v8 against v7, measured
+
+Both formats run through the real encoder and decoder on the same payloads,
+up to 3 GB. **All eight round trips came back byte-identical.**
+
+```bash
+python bench/bench_v8_vs_v7.py
+```
+
+<p align="center">
+  <img src="static/v8_vs_v7.png" alt="v8 against v7 at 10 MB to 3 GB" width="100%">
+</p>
+
+| payload | format | B/frame | video | expansion | encode | decode | videos | est. upload | result |
+|---|---|---|---|---|---|---|---|---|---|
+| 10 MB | **v7** | 56,100 | 32 MB | 3.16x | 1.2 s | 1.5 s | 1 | 0.2 min | identical |
+| 10 MB | **v8** | 166,540 | 55 MB | 5.52x | 0.9 s | 1.3 s | 1 | 0.4 min | identical |
+| 100 MB | **v7** | 56,100 | 316 MB | 3.16x | 6.4 s | 11.3 s | 1 | 2.2 min | identical |
+| 100 MB | **v8** | 166,540 | 552 MB | 5.52x | 5.6 s | 7.5 s | 1 | 3.9 min | identical |
+| 1 GB | **v7** | 56,100 | 3.15 GB | 3.15x | 71.5 s | 106.5 s | 1 | 22.4 min | identical |
+| 1 GB | **v8** | 166,540 | 5.52 GB | 5.52x | 53.0 s | 78.8 s | 1 | 39.2 min | identical |
+| 3 GB | **v7** | 56,100 | 9.47 GB | 3.16x | 216.0 s | 333.1 s | 3 | 67.1 min | identical |
+| 3 GB | **v8** | 166,540 | 16.57 GB | 5.52x | 159.5 s | 278.6 s | 1 | 117.5 min | identical |
+
+> Compute is measured. **Upload time is an estimate** — measured video bytes at
+> 18.8 Mbit/s, the rate `bench/bench_youtube.py` measured against the live
+> service on its 1 GB run. It is in the table because it is the term that
+> decides end-to-end time, and leaving it out would flatter v8.
+
+## What it shows
+
+**v8 is faster to compute.** At 3 GB it encodes 26% faster
+(160 s against 216 s) and decodes
+16% faster (279 s against 333 s).
+That is not a cleverer codec — it is that 2.97x the payload per frame means
+roughly a third of the frames, and per-frame work is what both ends spend
+their time on.
+
+**v8 puts 1.75x more on the wire.** 16.57 GB against
+9.47 GB for the same 3 GB. 2x2 blocks are close to the
+worst thing a video codec can be asked to represent, and three luma levels do
+not pay for themselves in H.264 terms even though they carry more bits.
+
+**So end to end, v8 is slower**, and by more than the compute saves:
+roughly 125 minutes against 76 for 3 GB once the estimated
+upload is included. The saving is seconds; the cost is tens of minutes.
+
+**But v8 needs one upload where v7 needs three.** Its per-video ceiling is
+3.78 GB against 1.27 GB, so a 3 GB archive is a single video and a single
+link rather than a playlist of three. That also removes the failure mode v6
+found the hard way, where one shard of four is transcoded harder than its
+siblings and lost.
+
+## So which one
+
+Keep **v7** unless you have a reason not to. It is the default, and for
+straightforward "put this file somewhere and get it back" it moves fewer bytes
+and finishes sooner.
+
+Reach for **v8** when the video *count* is what constrains you:
+
+- a file between 1.27 GB and 3.78 GB that you want in one video
+- staying under YouTube's daily upload allowance, which counts videos
+- avoiding multi-shard reassembly, and the per-video variance that comes with it
+
+The frame format is recorded in the header, so this is a per-upload choice and
+not a commitment: videos of both formats decode with the same reader.
 
 ---
 
