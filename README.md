@@ -36,72 +36,82 @@
 | [`v5-max-throughput`](../../tree/v5-max-throughput) | v5 | the first format chosen from real round trips, plus a native Reed-Solomon codec |
 | [`v6-parallel`](../../tree/v6-parallel) | v5 | sharding across concurrently uploaded videos, and a Windows executable |
 | [`v7-playlists`](../../tree/v7-playlists) | v5 | one playlist link per archive, a portable Docker image, faster archiving |
-| **`file_explorer`** (this one) | **v5** | a browsable file manager on top of v7, with encryption before upload |
+| [`file_explorer`](../../tree/file_explorer) | v5 | a browsable file manager on top of v7, with encryption before upload |
+| **`v8-dense-audio`** (this one) | **v8** | 3 levels per luma block instead of 2, and payload carried in the audio track |
 
-The frame format has not changed since v5 — a video encoded on
-`v5-max-throughput`, `v6-parallel`, `v7-playlists` or `file_explorer` decodes
-on all four. What the later branches add is everything around the format.
+v5 through `file_explorer` share one frame format — a video encoded on
+any of them decodes on all of them, and what those branches add is
+everything *around* the format. `v8-dense-audio` is the first change to
+the format itself since v5; it writes a different header, and readers
+from v5 onward handle both.
 
 ## What each version can and cannot do
 
-The same table appears on every branch. This one is **`file_explorer`**.
+The same table appears on every branch. This one is **`v8-dense-audio`**.
 
-| | `dev`<br>v3 | `optimization-v3`<br>v4 | `v5-max-`<br>`throughput` | `v6-parallel` | `v7-playlists` | `file_explorer` |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| Data per frame | 40,140 B | 64,200 B | 56,100 B | 56,100 B | 56,100 B | 56,100 B |
-| Recovers a file that really went through YouTube | untested | **no** | yes | yes | yes | **yes** |
-| Verified byte-identical at 1 GB | no | no | yes | yes | yes | **yes** |
-| Threaded, packed-bit pixel engine | no | no | yes | yes | yes | **yes** |
-| Native C Reed-Solomon (32x decode) | no | no | yes | yes | yes | **yes** |
-| Header in audio *and* description | no | no | yes | yes | yes | **yes** |
-| Selectable density profiles | no | no | yes | yes | yes | **yes** |
-| Archives larger than one video | no | no | no | yes | yes | **yes** |
-| One link for a split archive | no | no | no | no | yes | **yes** |
-| Windows executable | no | no | no | yes | yes | **yes** |
-| Docker image | no | no | no | no | yes | **yes** |
-| Browsable file manager | no | no | no | no | no | **yes** |
-| Encryption before upload | no | no | no | no | no | **yes** |
+| | `dev`<br>v3 | `optimization-v3`<br>v4 | `v5-max-`<br>`throughput` | `v6-parallel` | `v7-playlists` | `file_explorer` | `v8-dense-`<br>`audio` |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| Data per frame | 40,140 B | 64,200 B | 56,100 B | 56,100 B | 56,100 B | 56,100 B | 166,540 B |
+| Recovers a file that really went through YouTube | untested | **no** | yes | yes | yes | yes | probe only |
+| Verified byte-identical at 1 GB | no | no | yes | yes | yes | yes | local only |
+| Threaded, packed-bit pixel engine | no | no | yes | yes | yes | yes | **yes** |
+| Native C Reed-Solomon (32x decode) | no | no | yes | yes | yes | yes | **yes** |
+| Header in audio *and* description | no | no | yes | yes | yes | yes | **yes** |
+| Selectable density profiles | no | no | yes | yes | yes | yes | **yes** |
+| Archives larger than one video | no | no | no | yes | yes | yes | **yes** |
+| One link for a split archive | no | no | no | no | yes | yes | **yes** |
+| Windows executable | no | no | no | yes | yes | yes | **yes** |
+| Docker image | no | no | no | no | yes | yes | **yes** |
+| Browsable file manager | no | no | no | no | no | yes | **yes** |
+| Encryption before upload | no | no | no | no | no | yes | **yes** |
+| Level counts beyond powers of two | no | no | no | no | no | no | **yes** |
+| Payload carried in the audio track | no | no | no | no | no | no | **yes** |
 
 > "Verified byte-identical at 1 GB" means a single 1 GB video, uploaded to
 > YouTube and downloaded back. The **sharded** 1 GB path on `v6-parallel` and
 > later is not yet verified end to end — see *the error-correction margin*.
+>
+> `v8-dense-audio` is the exception and is marked accordingly. Its *format*
+> was chosen from a real YouTube upload, which measured the error rate of
+> every level count directly, but a complete v8 file has not yet made the
+> round trip through the service. Its 1 GB and 3 GB round trips are local.
 
 ### What this branch can do
 
-- Everything [`v7-playlists`](../../tree/v7-playlists) does — same format, same
-  sharding, same playlists, same Docker image.
-- **Present the whole thing as a file manager.** Folders, upload, preview,
-  download, rename, move, delete, search. It looks like ordinary cloud storage.
-- **Store no file content whatsoever.** The index holds names, sizes, types and
-  the YouTube link each file lives behind. Every byte is on YouTube; the local
-  database of a terabyte of files is a few hundred kilobytes.
-- **Encrypt before anything leaves the machine.** AES-256-GCM under a
-  passphrase, with scrypt key derivation, applied to the archive before it is
-  encoded into frames. What YouTube stores is ciphertext.
-- **Preview files in the browser** — images, text, PDF, audio, video — by
-  fetching and decoding on demand, with a local cache so the second look is
-  instant.
-- **Handle files up to 5 GB**, measured: nine round trips from 10 MB to 5 GB,
-  every one byte-identical, at a flat 12-13 MB/s encode and 9.8 MB/s decode.
-  See *Scaling* below for the graph and the memory ceiling behind it.
+- Everything [`file_explorer`](../../tree/file_explorer) does, plus the first
+  change to the frame format since v5.
+- **Carry 166,540 bytes per frame — 2.97x v7** — by writing *three* levels per
+  luma block where the format could previously only express powers of two.
+  Real YouTube measurement put the cliff between 2 levels (clean) and 4
+  (4.5e-02, unusable); 3 levels is clean at 2.7e-06 and was simply not
+  expressible before.
+- **Fit 3.78 GB in a single video** against v7's 1.27 GB, so a 3 GB archive is
+  one upload and one link rather than three.
+- **Compute faster than v7**: at 3 GB it encodes in 160 s against 216 and
+  decodes in 279 against 333, because a third of the frames means a third of
+  the per-frame work.
+- **Carry payload in the audio track**, which now covers the whole video
+  instead of falling silent after the header.
 
 ### What it cannot do
 
-- **Recover an encrypted file if you lose the passphrase.** It is never stored,
-  never logged, and never sent anywhere. There is no reset.
-- **Preview instantly the first time.** A preview is a real YouTube download
-  plus a decode; a large file takes as long as a download takes. Cached
-  afterwards.
-- **Serve several users.** The index is per-installation and unauthenticated —
-  it assumes the localhost or private-network deployment the rest of the
-  project assumes. Do not expose it to the internet as-is.
-- **Go much past 5 GB on a normal machine.** The pipeline holds whole archives
-  in memory as `bytes`, so a 5 GB payload peaks near 15 GB during decode. It
-  succeeded on 32 GB of RAM and would not on 16 GB. Streaming through a
-  temporary file is the fix and is not done.
-- Everything on v7's list still applies: the error-correction margin, the
-  playlist scope, the daily upload quota, and software encoding in the
-  container.
+- **Match v7 on upload.** This is the important one. v8 puts **1.75x more
+  bytes on the wire** for the same file — 16.57 GB against 9.47 GB at 3 GB —
+  and upload dominates end-to-end time. It saves seconds of compute and costs
+  tens of minutes of transfer, so v7 remains the default and v8 is for when
+  video *count* is the constraint.
+- **Claim a real YouTube round trip yet.** The format was chosen from one, and
+  the error rate of every level count was measured against the live service.
+  A complete v8 file has not been uploaded and brought back; the 1 GB and 3 GB
+  round trips here are local. Given this project's history that distinction is
+  worth keeping sharp.
+- **Get much from the audio channel.** It carries about 0.013% of the coded
+  stream, and because v8's denser frames make videos shorter, v8 gets *less*
+  audio than v7 does for the same payload — 8,815 bytes against 27,520 on a
+  60 MB file. The two halves of v8 work against each other here.
+- **Treat the audio as free redundancy any more.** Those bytes are in no other
+  channel, so a stripped track is now data loss. The decoder raises rather
+  than returning a short archive, and `audio_payload=False` turns it off.
 
 ## How It Works
 
