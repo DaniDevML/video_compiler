@@ -6,6 +6,7 @@
 #   • 1.6× more data per frame (64,080 bytes vs 40,140)
 #   • Backward-compatible: decoder handles VIDCMPR4, VIDCMPR3, and VIDCMPR2
 
+import math
 import struct
 from collections import Counter
 
@@ -25,6 +26,34 @@ CHROMA_W      = FRAME_WIDTH  // 2            # 960
 CHROMA_H      = FRAME_HEIGHT // 2            # 540
 
 
+def _group_shape(n_levels: int, max_bits: int = 57):
+    """How many base-N digits pack into how many bits.
+
+    A power-of-two level count is one digit per log2(N) bits and packs with no
+    waste -- that is the v5 path. Otherwise pick the group that carries the
+    most bits per digit, capped at 57 bits so the C layer's 64-bit accessors
+    stay in range at any bit offset.
+
+    Group size is a robustness knob as well as an efficiency one: one corrupted
+    digit changes the whole group integer, damaging every byte the group spans.
+    12 digits into 19 bits (3 levels) reaches 99.9% of theoretical while
+    keeping that blast radius at 3 bytes, comfortably inside RS(255,215).
+    """
+    if n_levels & (n_levels - 1) == 0:
+        return 1, n_levels.bit_length() - 1
+    best = (1, 1, 0.0)
+    for k in range(1, 64):
+        if n_levels ** k > (1 << 63):
+            break
+        b = int(math.floor(k * math.log2(n_levels)))
+        if not 0 < b <= max_bits:
+            continue
+        eff = b / (k * math.log2(n_levels))
+        if eff > best[2]:
+            best = (k, b, eff)
+    return best[0], best[1]
+
+
 class Profile:
     """A frame format: block size and bits per block, per plane.
 
@@ -33,18 +62,31 @@ class Profile:
     independently rather than sharing one block size.
     """
 
-    def __init__(self, block_y, bpp_y, block_c, bpp_c, name=''):
+    def __init__(self, block_y, bpp_y, block_c, bpp_c, name='',
+                 levels_y=None, levels_c=None):
         self.name = name
         self.block_y, self.bpp_y = block_y, bpp_y
         self.block_c, self.bpp_c = block_c, bpp_c
+
+        # v8: a plane may carry any number of levels, not only a power of two.
+        # When the count is a power of two this reduces exactly to the v5
+        # packed-bit path, so existing profiles are unchanged.
+        self.levels_y = levels_y if levels_y else (1 << bpp_y)
+        self.levels_c = levels_c if levels_c else (1 << bpp_c)
+        self.dig_y, self.gbits_y = _group_shape(self.levels_y)
+        self.dig_c, self.gbits_c = _group_shape(self.levels_c)
+        self.basen_y = self.dig_y > 1
+        self.basen_c = self.dig_c > 1
 
         self.blocks_x   = FRAME_WIDTH  // block_y
         self.data_rows  = FRAME_HEIGHT // block_y - SYNC_ROWS
         self.blocks_x_c = CHROMA_W // block_c
         self.data_rows_c = CHROMA_H // block_c - SYNC_ROWS
 
-        self.bits_y = self.blocks_x   * self.data_rows   * bpp_y
-        self.bits_c = self.blocks_x_c * self.data_rows_c * bpp_c
+        self.syms_y = self.blocks_x   * self.data_rows
+        self.syms_c = self.blocks_x_c * self.data_rows_c
+        self.bits_y = (self.syms_y // self.dig_y) * self.gbits_y
+        self.bits_c = (self.syms_c // self.dig_c) * self.gbits_c
         self.bits   = self.bits_y + 2 * self.bits_c
         self.bytes  = self.bits // 8
 
@@ -57,8 +99,8 @@ class Profile:
         self.plane_bit_offsets = (0, self.bits_y, self.bits_y + self.bits_c)
 
     def __repr__(self):
-        return (f'Profile({self.name}: Y {self.block_y}px/{self.bpp_y}bpp + '
-                f'C {self.block_c}px/{self.bpp_c}bpp = {self.bytes:,} B/frame)')
+        return (f'Profile({self.name}: Y {self.block_y}px/{self.levels_y}lv + '
+                f'C {self.block_c}px/{self.levels_c}lv = {self.bytes:,} B/frame)')
 
 
 # ── The v5 formats ──────────────────────────────────────────────────────────
@@ -125,6 +167,28 @@ PROFILE_V3 = Profile(block_y=4, bpp_y=2, block_c=4, bpp_c=1, name='v3')
 # Y 4px/1bpp measured zero errors through YouTube.
 PROFILE_HEADER = Profile(block_y=4, bpp_y=1, block_c=4, bpp_c=1, name='header')
 
+# ── The v8 format ───────────────────────────────────────────────────────────
+#
+# Measured on real YouTube (bench/probe_levels.py, video fMINe--kLfo), sweeping
+# level counts one at a time rather than bits per block:
+#
+#   luma 2px, 2 levels   spacing 255.0   SER 0.0        clean
+#   luma 2px, 3 levels   spacing 127.5   SER 2.7e-06    clean   <- v8
+#   luma 2px, 4 levels   spacing  85.0   SER 4.5e-02    fails
+#
+# Three levels on luma is a rung the bit-based format could not express, and it
+# carries 58.5% more than two levels while staying clean. Every non-power-of-2
+# rung tried on chroma failed, so chroma stays at 4 levels.
+#
+# The cost is real and is measured in bench/bench_v8_size.py: 2x2 blocks are
+# the most expensive thing a video codec can be asked to encode, so v8 carries
+# 2.97x the payload per frame but spends 1.75x the uploaded bytes per payload
+# byte. It is the right choice when frame count matters -- it raises the
+# single-video ceiling from 1.28 GB to 3.78 GB -- and the wrong one when
+# upload time dominates, which for most files it does.
+PROFILE_V8 = Profile(block_y=2, bpp_y=1, block_c=2, bpp_c=2,
+                     name='v8', levels_y=3)
+
 DEFAULT_PROFILE = PROFILE_V5
 
 # Module-level aliases for the active profile (many call sites read these).
@@ -156,6 +220,15 @@ NROOTS        = 40
 CHUNK_IN      = 255 - NROOTS               # 215
 
 # v5 format — carries a block size per plane, since luma and chroma now differ
+# v8 carries two extra bytes: the level count for each plane. Everything
+# before v8 could only express powers of two, so a bpp implied the levels; v8
+# can use 3 levels on luma, which no bpp describes. A v8 profile therefore
+# writes a v8 header, and a profile that happens to be power-of-two still
+# writes a v5 header so older builds keep decoding it.
+MAGIC_V8      = b'VIDCMPR8'
+HEADER_FORMAT_V8 = '<8sIIIIBBBBBBBIBBxx'
+HEADER_SIZE_V8   = struct.calcsize(HEADER_FORMAT_V8)
+
 MAGIC         = b'VIDCMPR5'
 HEADER_FORMAT = '<8sIIIIBBBBBBBIx'
 # magic(8) archive_size(4) num_data_frames(4) encoded_size(4) crc32(4)
@@ -232,6 +305,14 @@ _PC = _params(BLOCK_SIZE, CHROMA_W,    CHROMA_H,     BPP_C)    # Cb/Cr planes
 def pack_header(archive_size, num_data_frames, encoded_size, crc32,
                 audio_bytes: int = 0, profile: 'Profile' = None) -> bytes:
     p = profile or DEFAULT_PROFILE
+    if p.basen_y or p.basen_c:
+        raw = struct.pack(HEADER_FORMAT_V8,
+                          MAGIC_V8, archive_size, num_data_frames, encoded_size,
+                          crc32, NROOTS, p.block_y, p.block_c, FPS,
+                          p.bpp_y, p.bpp_c, 3,   # planes (3 = YUV)
+                          audio_bytes, p.levels_y, p.levels_c)
+        assert len(raw) == HEADER_SIZE_V8
+        return raw
     raw = struct.pack(HEADER_FORMAT,
                       MAGIC, archive_size, num_data_frames, encoded_size, crc32,
                       NROOTS, p.block_y, p.block_c, FPS,
@@ -248,6 +329,15 @@ def unpack_header(raw: bytes) -> dict:
     block size for both planes, so both fields carry it.
     """
     magic = raw[:8]
+    if magic == MAGIC_V8:
+        sz = HEADER_SIZE_V8
+        (magic, arch, ndf, enc, crc, nr, by, bc, fps, bpy, bpc, planes,
+         abytes, lvy, lvc) = struct.unpack(HEADER_FORMAT_V8, raw[:sz])
+        return dict(magic=magic, archive_size=arch, num_data_frames=ndf,
+                    encoded_size=enc, crc32=crc, nroots=nr, block_size=by,
+                    block_y=by, block_c=bc, fps=fps, bpp_y=bpy, bpp_c=bpc,
+                    planes=planes, audio_bytes=abytes,
+                    levels_y=lvy, levels_c=lvc)
     if magic == MAGIC_V2:
         sz = HEADER_SIZE_V2
         magic, arch, ndf, enc, crc, nr, bs, fps = struct.unpack(HEADER_FORMAT_V2, raw[:sz])
@@ -283,9 +373,15 @@ def unpack_header(raw: bytes) -> dict:
 
 
 def profile_from_header(h: dict) -> Profile:
-    """The frame format a decoded header describes."""
+    """The frame format a decoded header describes.
+
+    Level counts are only present in v8 headers. Older headers imply them from
+    the bits per block, which is what every version before v8 could express.
+    """
     return Profile(h['block_y'], h['bpp_y'], h['block_c'],
-                   max(1, h['bpp_c']), name=h['magic'].decode(errors='replace'))
+                   max(1, h['bpp_c']),
+                   name=h['magic'].decode(errors='replace'),
+                   levels_y=h.get('levels_y'), levels_c=h.get('levels_c'))
 
 # ---------------------------------------------------------------------------
 # Sidecar header (carried in the video description)
@@ -453,6 +549,8 @@ try:
                         PACK_PAD,
                         encode_plane_c, decode_plane_c,
                         encode_plane_packed_c, decode_plane_packed_c,
+                        encode_plane_basen_c, decode_plane_basen_c,
+                        BASEN_AVAILABLE,
                         check_sync_c, check_sync_batch_c)
 except ImportError:
     NATIVE_AVAILABLE = False
@@ -582,6 +680,17 @@ def _plane_params(profile: Profile):
     return py, pc, pc
 
 
+def _plane_levels(profile: Profile):
+    """(Y, Cb, Cr) (n_levels, digits, group_bits) for a profile.
+
+    digits == 1 means the plane is a whole number of bits per block and takes
+    the v5 packed path; anything else takes the v8 base-N path.
+    """
+    y = (profile.levels_y, profile.dig_y, profile.gbits_y)
+    c = (profile.levels_c, profile.dig_c, profile.gbits_c)
+    return y, c, c
+
+
 def packed_to_yuv_frames(src: np.ndarray, n_frames: int,
                          first_frame: int = 0,
                          profile: Profile = None) -> np.ndarray:
@@ -591,6 +700,11 @@ def packed_to_yuv_frames(src: np.ndarray, n_frames: int,
     stream this batch starts, so batches can be produced without re-slicing.
     """
     p = profile or DEFAULT_PROFILE
+    if (p.basen_y or p.basen_c) and not BASEN_AVAILABLE:
+        raise RuntimeError(
+            f'profile {p.name!r} needs the base-N native path, which this '
+            f'build of the C library does not provide. Rebuild with '
+            f'python native/build.py, or choose a power-of-two profile.')
     if not PACKED_AVAILABLE:
         start = first_frame * p.bits
         bits = np.unpackbits(src[:-PACK_PAD] if PACK_PAD else src)
@@ -602,11 +716,19 @@ def packed_to_yuv_frames(src: np.ndarray, n_frames: int,
 
     base = first_frame * p.bits
     planes = []
-    for pp, off in zip(_plane_params(p), p.plane_bit_offsets):
-        planes.append(encode_plane_packed_c(
-            src, base + off, p.bits, n_frames,
-            pp['ph'], pp['pw'], pp['bs'], pp['bx'], pp['dr'], SYNC_ROWS,
-            pp['bpp']))
+    for pp, off, spec in zip(_plane_params(p), p.plane_bit_offsets,
+                             _plane_levels(p)):
+        n_lv, dig, gb = spec
+        if dig > 1:
+            planes.append(encode_plane_basen_c(
+                src, base + off, p.bits, n_frames,
+                pp['ph'], pp['pw'], pp['bs'], pp['bx'], pp['dr'], SYNC_ROWS,
+                n_lv, dig, gb))
+        else:
+            planes.append(encode_plane_packed_c(
+                src, base + off, p.bits, n_frames,
+                pp['ph'], pp['pw'], pp['bs'], pp['bx'], pp['dr'], SYNC_ROWS,
+                pp['bpp']))
 
     out = np.empty((n_frames, YUV_FRAME_BYTES), dtype=np.uint8)
     out[:, :Y_PLANE_BYTES] = planes[0].reshape(n_frames, -1)
@@ -620,6 +742,10 @@ def yuv_frames_to_packed(yuv_frames: np.ndarray,
     """Decode frames straight to packed bytes, (n * profile.bytes,) uint8."""
     p = profile or DEFAULT_PROFILE
     n = len(yuv_frames)
+    if (p.basen_y or p.basen_c) and not BASEN_AVAILABLE:
+        raise RuntimeError(
+            f'profile {p.name!r} needs the base-N native path, which this '
+            f'build of the C library does not provide.')
     if not PACKED_AVAILABLE:
         bits = yuv_frames_to_bits(yuv_frames, profile=p)
         return np.packbits(bits.reshape(-1))
@@ -631,12 +757,19 @@ def yuv_frames_to_packed(yuv_frames: np.ndarray,
         .reshape(n, CHROMA_H, CHROMA_W)
 
     out = np.zeros(n * p.bytes + PACK_PAD, dtype=np.uint8)
-    for frames, pp, off in zip((Y, Cb, Cr), _plane_params(p),
-                               p.plane_bit_offsets):
-        decode_plane_packed_c(
-            frames, out, off, p.bits,
-            pp['ph'], pp['pw'], pp['bs'], pp['bx'], pp['dr'], SYNC_ROWS,
-            pp['bpp'], pp['m'])
+    for frames, pp, off, spec in zip((Y, Cb, Cr), _plane_params(p),
+                                     p.plane_bit_offsets, _plane_levels(p)):
+        n_lv, dig, gb = spec
+        if dig > 1:
+            decode_plane_basen_c(
+                frames, out, off, p.bits,
+                pp['ph'], pp['pw'], pp['bs'], pp['bx'], pp['dr'], SYNC_ROWS,
+                n_lv, dig, gb, pp['m'])
+        else:
+            decode_plane_packed_c(
+                frames, out, off, p.bits,
+                pp['ph'], pp['pw'], pp['bs'], pp['bx'], pp['dr'], SYNC_ROWS,
+                pp['bpp'], pp['m'])
     return out[:n * p.bytes]
 
 
@@ -690,7 +823,9 @@ def yuv_frame_to_header(yuv_frame: np.ndarray,
     bits  = yuv_frames_to_bits(row, profile=prof)[0]
     raw   = bits_to_bytes(bits)
 
-    for hs, expected_magic in [(HEADER_SIZE, MAGIC), (HEADER_SIZE_V4, MAGIC_V4),
+    for hs, expected_magic in [(HEADER_SIZE_V8, MAGIC_V8),
+                               (HEADER_SIZE, MAGIC),
+                               (HEADER_SIZE_V4, MAGIC_V4),
                                (HEADER_SIZE_V3, MAGIC_V3),
                                (HEADER_SIZE_V2, MAGIC_V2)]:
         copies = [raw[k * hs:(k + 1) * hs] for k in range(HEADER_REPEAT)]

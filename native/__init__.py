@@ -125,6 +125,48 @@ def _load():
                 ctypes.c_int,      # n_threads
             ]
 
+        # v8 base-N entry points. Level counts that are not powers of two
+        # cannot be expressed as bits per block, so these take a level count
+        # plus the (digits, gbits) group shape instead of a bpp.
+        if hasattr(lib, 'encode_plane_basen'):
+            lib.encode_plane_basen.restype  = None
+            lib.encode_plane_basen.argtypes = [
+                _c_uint8_p,        # src (packed bytes)
+                ctypes.c_uint64,   # bit_offset
+                ctypes.c_uint64,   # bit_stride
+                _c_uint8_p,        # out
+                ctypes.c_int,      # n_frames
+                ctypes.c_int,      # plane_h
+                ctypes.c_int,      # plane_w
+                ctypes.c_int,      # block_size
+                ctypes.c_int,      # blocks_x
+                ctypes.c_int,      # blocks_y_data
+                ctypes.c_int,      # sync_rows
+                ctypes.c_int,      # n_levels
+                ctypes.c_int,      # digits per group
+                ctypes.c_int,      # bits per group
+                ctypes.c_int,      # n_threads
+            ]
+            lib.decode_plane_basen.restype  = None
+            lib.decode_plane_basen.argtypes = [
+                _c_uint8_p,        # frames
+                _c_uint8_p,        # out (must start zeroed)
+                ctypes.c_uint64,   # bit_offset
+                ctypes.c_uint64,   # bit_stride
+                ctypes.c_int,      # n_frames
+                ctypes.c_int,      # plane_h
+                ctypes.c_int,      # plane_w
+                ctypes.c_int,      # block_size
+                ctypes.c_int,      # blocks_x
+                ctypes.c_int,      # blocks_y_data
+                ctypes.c_int,      # sync_rows
+                ctypes.c_int,      # n_levels
+                ctypes.c_int,      # digits per group
+                ctypes.c_int,      # bits per group
+                ctypes.c_int,      # margin
+                ctypes.c_int,      # n_threads
+            ]
+
         if hasattr(lib, 'native_threads'):
             lib.native_threads.restype  = ctypes.c_int
             lib.native_threads.argtypes = []
@@ -160,6 +202,7 @@ _load()
 NATIVE_AVAILABLE = _lib is not None
 PACKED_AVAILABLE = NATIVE_AVAILABLE and hasattr(_lib, 'encode_plane_packed')
 RS_AVAILABLE     = NATIVE_AVAILABLE and hasattr(_lib, 'rs_decode_batch')
+BASEN_AVAILABLE  = NATIVE_AVAILABLE and hasattr(_lib, 'encode_plane_basen')
 
 # Threads the C library will use internally. >1 means it was built with
 # OpenMP, in which case callers must not add a second layer of parallelism.
@@ -168,8 +211,9 @@ NATIVE_THREADS = (_lib.native_threads()
                   else 1)
 
 # get_bits/put_bits read and write three bytes at a time, so the packed
-# buffers handed to the C layer need slack past the last real bit.
-PACK_PAD = 4
+# buffers handed to the C layer need slack past the last real bit. The v8
+# base-N path uses the 64-bit accessors, which touch eight.
+PACK_PAD = 8
 
 
 def _ptr(arr: np.ndarray):
@@ -272,6 +316,44 @@ def decode_plane_packed_c(frames: np.ndarray, out: np.ndarray,
         len(frames_c), plane_h, plane_w,
         block_size, blocks_x, blocks_y_data, sync_rows, bpp, margin,
         NATIVE_THREADS,
+    )
+
+
+# ─── base-N fast path (v8) ────────────────────────────────────────────────────
+
+def encode_plane_basen_c(src: np.ndarray,
+                         bit_offset: int, bit_stride: int,
+                         n_frames: int,
+                         plane_h: int, plane_w: int,
+                         block_size: int, blocks_x: int,
+                         blocks_y_data: int, sync_rows: int,
+                         n_levels: int, digits: int, gbits: int) -> np.ndarray:
+    """Encode packed payload bytes as base-`n_levels` block symbols."""
+    out = np.empty(n_frames * plane_h * plane_w, dtype=np.uint8)
+    _lib.encode_plane_basen(
+        _ptr(src), ctypes.c_uint64(bit_offset), ctypes.c_uint64(bit_stride),
+        _ptr(out), n_frames, plane_h, plane_w,
+        block_size, blocks_x, blocks_y_data, sync_rows,
+        n_levels, digits, gbits, NATIVE_THREADS,
+    )
+    return out.reshape(n_frames, plane_h, plane_w)
+
+
+def decode_plane_basen_c(frames: np.ndarray, out: np.ndarray,
+                         bit_offset: int, bit_stride: int,
+                         plane_h: int, plane_w: int,
+                         block_size: int, blocks_x: int,
+                         blocks_y_data: int, sync_rows: int,
+                         n_levels: int, digits: int, gbits: int,
+                         margin: int) -> None:
+    """Decode base-N block symbols into `out`, which must start zeroed."""
+    frames_c = np.ascontiguousarray(frames, dtype=np.uint8)
+    _lib.decode_plane_basen(
+        _ptr(frames_c), _ptr(out),
+        ctypes.c_uint64(bit_offset), ctypes.c_uint64(bit_stride),
+        len(frames_c), plane_h, plane_w,
+        block_size, blocks_x, blocks_y_data, sync_rows,
+        n_levels, digits, gbits, margin, NATIVE_THREADS,
     )
 
 

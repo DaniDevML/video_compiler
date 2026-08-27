@@ -8,6 +8,7 @@ capacity claims can be *measured* rather than guessed.
 Nothing here is used at runtime by the app -- it exists to pick the format
 constants and to produce the numbers in the README.
 """
+import math
 import os
 import subprocess
 import sys
@@ -285,3 +286,78 @@ def measure(fmt: Format, n_frames=6, preset='nvenc_qp18', yt='none', seed=7):
         for t in (tmp1, tmp2):
             if os.path.exists(t):
                 os.unlink(t)
+
+
+# ---------------------------------------------------------------------------
+# Arbitrary level counts (v8)
+# ---------------------------------------------------------------------------
+#
+# Everything above is built on bits per block, so the only densities it can
+# express are powers of two: 2, 4, 8, 16 levels. The real YouTube probes put
+# the chroma cliff between 4 levels (1.6e-07, essentially clean) and 8 levels
+# (3.5e-03, unusable) -- a 20,000x jump across a single rung. The usable
+# maximum is somewhere inside that gap and the bit-based code cannot even
+# describe it.
+#
+# These helpers modulate *symbols* rather than bits, so any level count works
+# and the ladder can be swept one level at a time. Packing a byte stream into
+# base-N digits is a separate, lossless concern; what decides the format is
+# the symbol error rate, measured here.
+
+def sym_levels(n: int) -> np.ndarray:
+    """n evenly spaced levels spanning 0..255."""
+    return np.round(np.linspace(0, 255, n)).astype(np.uint8)
+
+
+class SymSpec:
+    """A plane carrying one base-N symbol per block."""
+
+    def __init__(self, pw, ph, block, n_levels, sync_rows=SYNC_ROWS):
+        self.pw, self.ph, self.block = pw, ph, block
+        self.n = n_levels
+        self.bx = pw // block
+        self.by = ph // block
+        self.sync_rows = sync_rows
+        self.dr = self.by - sync_rows
+        self.syms = self.bx * self.dr
+        self.lv = sym_levels(n_levels)
+        self.spacing = 255.0 / (n_levels - 1) if n_levels > 1 else 255.0
+
+    @property
+    def bits(self) -> float:
+        return self.syms * math.log2(self.n)
+
+    def __repr__(self):
+        return (f'SymSpec({self.pw}x{self.ph} b{self.block} {self.n}lv '
+                f'spacing {self.spacing:.1f})')
+
+
+def modulate_sym(syms: np.ndarray, sp: SymSpec, n: int) -> np.ndarray:
+    """(n*sp.syms,) symbols in 0..N-1 -> (n, ph, pw) uint8."""
+    s = syms[:n * sp.syms].reshape(n, sp.dr, sp.bx)
+    px = sp.lv[s]
+    exp = np.repeat(np.repeat(px, sp.block, axis=1), sp.block, axis=2)
+
+    out = np.zeros((n, sp.ph, sp.pw), dtype=np.uint8)
+    sh = sp.sync_rows * sp.block
+    r = np.repeat(np.arange(sp.sync_rows), sp.block)
+    checker = ((r[:, None] + np.arange(sp.bx)[None, :]) % 2 == 0)
+    out[:, :sh, :] = np.repeat(checker.astype(np.uint8) * 255, sp.block, axis=1)
+    out[:, sh:sh + sp.dr * sp.block, :] = exp
+    return out
+
+
+def demodulate_sym(planes: np.ndarray, sp: SymSpec, margin=None) -> np.ndarray:
+    """(n, ph, pw) uint8 -> (n*sp.syms,) symbols, by nearest level."""
+    n = len(planes)
+    if margin is None:
+        margin = 1 if sp.block >= 4 else 0
+    inner = sp.block - 2 * margin
+    sh = sp.sync_rows * sp.block
+    data = planes[:, sh:sh + sp.dr * sp.block, :]
+    v = data.reshape(n, sp.dr, sp.block, sp.bx, sp.block)
+    reg = v[:, :, margin:margin + inner, :, margin:margin + inner]
+    mean = reg.mean(axis=(2, 4))
+
+    edges = (sp.lv[:-1].astype(np.float64) + sp.lv[1:]) / 2.0
+    return np.searchsorted(edges, mean).astype(np.uint8).reshape(-1)

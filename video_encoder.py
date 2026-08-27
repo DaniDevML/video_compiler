@@ -254,14 +254,20 @@ def encode_files_to_video(file_paths: list, output_path: str, progress=None):
 
 
 def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
-                          extra_sidecar: str = ''):
+                          extra_sidecar: str = '', profile=None):
     """Write an arbitrary byte string to one video.
 
     Split out from encode_files_to_video so a shard -- a slice of a larger
     archive, not a valid archive on its own -- can be encoded by the same path.
     `extra_sidecar` is appended to the .sidecar file, which is how the shard
     manifest travels alongside the header.
+
+    `profile` selects the frame format. It defaults to the module default; the
+    header records it, so a video encoded with any profile decodes without the
+    reader being told which one.
     """
+    prof = profile or DEFAULT_PROFILE
+    bytes_per_frame = prof.bytes
     def log(msg):
         if progress:
             progress(msg)
@@ -279,13 +285,14 @@ def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
 
     encoded      = rs_encode(archive)
     encoded_size = len(encoded)
-    log(f'ECC encoded: {encoded_size:,} bytes  ({BYTES_PER_FRAME:,} bytes/frame).')
+    log(f'ECC encoded: {encoded_size:,} bytes  '
+        f'({bytes_per_frame:,} bytes/frame, profile {prof.name}).')
 
-    num_data_frames = math.ceil(len(encoded) / BYTES_PER_FRAME)
+    num_data_frames = math.ceil(len(encoded) / bytes_per_frame)
     # One zero-padded buffer covering every frame, with the slack the packed
     # bit reader needs past the end. Frames are cut from this without copying.
     frame_src = pad_for_packed(
-        encoded.ljust(num_data_frames * BYTES_PER_FRAME, b'\x00'))
+        encoded.ljust(num_data_frames * bytes_per_frame, b'\x00'))
 
     total_frames        = 1 + num_data_frames
     total_audio_samples = int(total_frames / FPS * _ac.SAMPLE_RATE)
@@ -294,7 +301,8 @@ def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
         f'(header copy embedded for decode robustness)')
 
     # Header frame
-    header_raw = pack_header(archive_size, num_data_frames, encoded_size, archive_crc)
+    header_raw = pack_header(archive_size, num_data_frames, encoded_size,
+                             archive_crc, profile=prof)
     header_yuv = header_to_yuv_frame(header_raw)   # (YUV_FRAME_BYTES,) uint8
 
     codec, hw_params = _get_encoder()
@@ -362,7 +370,8 @@ def encode_bytes_to_video(archive: bytes, output_path: str, progress=None,
         # avoids copying every batch (~100 MB each) a second time.
         for batch_start in range(0, num_data_frames, ENCODE_BATCH):
             n = min(ENCODE_BATCH, num_data_frames - batch_start)
-            write_q.put(packed_to_yuv_frames(frame_src, n, batch_start))
+            write_q.put(packed_to_yuv_frames(frame_src, n, batch_start,
+                                             profile=prof))
 
             done = batch_start + n
             if done % (ENCODE_BATCH * 10) == 0:

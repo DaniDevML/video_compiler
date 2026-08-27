@@ -1,0 +1,181 @@
+{
+ "video_id": "fMINe--kLfo",
+ "rows": [
+  {
+   "plane": "chroma",
+   "block": 2,
+   "levels": 4,
+   "spacing": 85.0,
+   "bits_per_sym": 2.0,
+   "symbols": 4116480,
+   "errors": 95,
+   "ser": 2.3077969527363184e-05,
+   "bytes_per_frame_if_adopted": 128880
+  },
+  {
+   "plane": "chroma",
+   "block": 2,
+   "levels": 5,
+   "spacing": 63.75,
+   "bits_per_sym": 2.3219,
+   "symbols": 4116480,
+   "errors": 6081,
+   "ser": 0.0014772329757462687,
+   "bytes_per_frame_if_adopted": 139233
+  },
+  {
+   "plane": "chroma",
+   "block": 2,
+   "levels": 6,
+   "spacing": 51.0,
+   "bits_per_sym": 2.585,
+   "symbols": 4116480,
+   "errors": 22119,
+   "ser": 0.005373280083955224,
+   "bytes_per_frame_if_adopted": 147692
+  },
+  {
+   "plane": "chroma",
+   "block": 2,
+   "levels": 7,
+   "spacing": 42.5,
+   "bits_per_sym": 2.8074,
+   "symbols": 4116480,
+   "errors": 187177,
+   "ser": 0.04547015897077115,
+   "bytes_per_frame_if_adopted": 154844
+  },
+  {
+   "plane": "chroma",
+   "block": 2,
+   "levels": 8,
+   "spacing": 36.43,
+   "bits_per_sym": 3.0,
+   "symbols": 4116480,
+   "errors": 270975,
+   "ser": 0.06582687150186567,
+   "bytes_per_frame_if_adopted": 161040
+  },
+  {
+   "plane": "chroma",
+   "block": 4,
+   "levels": 8,
+   "spacing": 36.43,
+   "bits_per_sym": 3.0,
+   "symbols": 1021440,
+   "errors": 260,
+   "ser": 0.0002545426065162907,
+   "bytes_per_frame_if_adopted": 88500
+  },
+  {
+   "plane": "chroma",
+   "block": 4,
+   "levels": 9,
+   "spacing": 31.88,
+   "bits_per_sym": 3.1699,
+   "symbols": 1021440,
+   "errors": 890,
+   "ser": 0.0008713189223057644,
+   "bytes_per_frame_if_adopted": 89856
+  },
+  {
+   "plane": "chroma",
+   "block": 4,
+   "levels": 10,
+   "spacing": 28.33,
+   "bits_per_sym": 3.3219,
+   "symbols": 1021440,
+   "errors": 2063,
+   "ser": 0.0020196976817042607,
+   "bytes_per_frame_if_adopted": 91068
+  },
+  {
+   "plane": "chroma",
+   "block": 4,
+   "levels": 12,
+   "spacing": 23.18,
+   "bits_per_sym": 3.585,
+   "symbols": 1021440,
+   "errors": 14750,
+   "ser": 0.014440397869674186,
+   "bytes_per_frame_if_adopted": 93168
+  },
+  {
+   "plane": "luma",
+   "block": 4,
+   "levels": 4,
+   "spacing": 85.0,
+   "bits_per_sym": 2.0,
+   "symbols": 2058240,
+   "errors": 85,
+   "ser": 4.129741915422886e-05,
+   "bytes_per_frame_if_adopted": 96480
+  },
+  {
+   "plane": "luma",
+   "block": 4,
+   "levels": 5,
+   "spacing": 63.75,
+   "bits_per_sym": 2.3219,
+   "symbols": 2058240,
+   "errors": 6018,
+   "ser": 0.002923857276119403,
+   "bytes_per_frame_if_adopted": 101656
+  },
+  {
+   "plane": "luma",
+   "block": 4,
+   "levels": 6,
+   "spacing": 51.0,
+   "bits_per_sym": 2.585,
+   "symbols": 2058240,
+   "errors": 68740,
+   "ser": 0.033397465796019904,
+   "bytes_per_frame_if_adopted": 105886
+  },
+  {
+   "plane": "luma",
+   "block": 4,
+   "levels": 7,
+   "spacing": 42.5,
+   "bits_per_sym": 2.8074,
+   "symbols": 2058240,
+   "errors": 161980,
+   "ser": 0.07869830534825871,
+   "bytes_per_frame_if_adopted": 109462
+  },
+  {
+   "plane": "luma",
+   "block": 2,
+   "levels": 2,
+   "spacing": 255.0,
+   "bits_per_sym": 1.0,
+   "symbols": 8263680,
+   "errors": 0,
+   "ser": 0.0,
+   "bytes_per_frame_if_adopted": 128880
+  },
+  {
+   "plane": "luma",
+   "block": 2,
+   "levels": 3,
+   "spacing": 127.5,
+   "bits_per_sym": 1.585,
+   "symbols": 8263680,
+   "errors": 22,
+   "ser": 2.6622521685254027e-06,
+   "bytes_per_frame_if_adopted": 166645
+  },
+  {
+   "plane": "luma",
+   "block": 2,
+   "levels": 4,
+   "spacing": 85.0,
+   "bits_per_sym": 2.0,
+   "symbols": 8263680,
+   "errors": 369168,
+   "ser": 0.044673559479553905,
+   "bytes_per_frame_if_adopted": 193440
+  }
+ ]
+}

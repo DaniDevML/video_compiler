@@ -27,7 +27,7 @@ from video_codec import (
     NROOTS, CHUNK_IN, FPS,
     HEADER_SIZE, HEADER_REPEAT,
     MAGIC, MAGIC_V3, MAGIC_V2,
-    MAGIC_V4,
+    MAGIC_V4, MAGIC_V8,
     unpack_header, bits_to_bytes, decode_sidecar,
     yuv_frames_to_bits, yuv_frames_to_packed,
     check_sync_yuv, yuv_frame_to_header, profile_from_header,
@@ -55,7 +55,9 @@ _BYTES_SENTINEL = _BytesSentinel()
 # v4 and v3 wrote the header frame in their own payload format.
 _HEADER_PROFILES = [PROFILE_HEADER, PROFILE_V4, PROFILE_V3]
 
-_V5_MAGICS = (MAGIC, MAGIC_V4, MAGIC_V3)
+# Every magic whose frames are yuv420p block-modulated. v8 joins the same
+# decode path -- profile_from_header sorts out the level counts.
+_V5_MAGICS = (MAGIC_V8, MAGIC, MAGIC_V4, MAGIC_V3)
 
 # ---------------------------------------------------------------------------
 # Reed-Solomon decode  (galois – numba-JIT vectorised)
@@ -401,7 +403,7 @@ def header_from_audio(media_path: str) -> dict | None:
         with open(tmp, 'rb') as f:
             pcm = f.read()
         raw = _ac.decode_audio(pcm)
-        if not raw or raw[:8] not in (MAGIC, MAGIC_V3, MAGIC_V2):
+        if not raw or raw[:8] not in (MAGIC_V8, MAGIC, MAGIC_V3, MAGIC_V2):
             return None
         return unpack_header(raw)
     except Exception:

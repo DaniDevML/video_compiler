@@ -117,6 +117,58 @@ static inline void put_bits(uint8_t *dst, uint64_t pos, int n, uint32_t val) {
     dst[byte + 2] |= (uint8_t)(v);
 }
 
+/* ─── wide packed bit access (v8) ─────────────────────────────────────────────
+ * get_bits/put_bits above read three bytes, so with a bit offset of up to 7
+ * they can only move 17 bits. Base-3 luma packs 12 digits into 19 bits, which
+ * does not fit. These 64-bit variants touch eight bytes and are safe for any
+ * width up to 57 bits at any offset. Callers guarantee 8 bytes of readable
+ * padding past the payload, as the narrow versions already required 4.
+ */
+static inline uint64_t get_bits64(const uint8_t *src, uint64_t pos, int n) {
+    uint64_t byte = pos >> 3;
+    int      off  = (int)(pos & 7);
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v = (v << 8) | (uint64_t)src[byte + i];
+    return (v >> (64 - off - n)) & ((n == 64) ? ~0ULL : ((1ULL << n) - 1));
+}
+
+static inline void put_bits64(uint8_t *dst, uint64_t pos, int n, uint64_t val) {
+    uint64_t byte = pos >> 3;
+    int      off  = (int)(pos & 7);
+    uint64_t mask = (n == 64) ? ~0ULL : ((1ULL << n) - 1);
+    uint64_t v = (val & mask) << (64 - off - n);
+    for (int i = 0; i < 8; i++)
+        dst[byte + i] |= (uint8_t)(v >> (56 - 8 * i));
+}
+
+/* ─── base-N levels ───────────────────────────────────────────────────────────
+ * Level counts that are not powers of two cannot be described in bits per
+ * block, which is why the format was stuck on 2, 4, 8 and 16 levels. Real
+ * YouTube measurement put the luma cliff between 2 levels (clean) and 4
+ * (4.5e-02, unusable), with 3 levels clean at 2.7e-06 -- a rung the old format
+ * had no way to express.
+ *
+ * A group of `digits` symbols carries `gbits` bits, chosen so that
+ * n_levels**digits >= 2**gbits with the least waste. For 3 levels that is
+ * 12 digits per 19 bits: 3**12 = 531441 >= 2**19 = 524288, 99.9% of the
+ * theoretical log2(3) per digit.
+ *
+ * Keeping the group small also bounds error amplification. One corrupted digit
+ * changes the whole group integer, so it can damage every byte the group
+ * spans; at 19 bits that is at most 3 bytes, well inside what RS(255,215)
+ * repairs. A larger group would be marginally more efficient and considerably
+ * more fragile.
+ */
+static void build_levels_n(int n_levels, uint8_t *lv) {
+    if (n_levels <= 1) { lv[0] = 0; return; }
+    for (int s = 0; s < n_levels; s++)
+        lv[s] = (uint8_t)((s * 255 * 2 + (n_levels - 1)) / (2 * (n_levels - 1)));
+}
+
+static inline int slice_level_n(int mean, int n_levels) {
+    return (mean * (n_levels - 1) + 127) / 255;
+}
+
 /* ─── sync rows ───────────────────────────────────────────────────────────── */
 
 static void write_sync(uint8_t *frame, int plane_w, int block_size,
@@ -412,4 +464,139 @@ EXPORT int native_threads(void) {
 #else
     return 1;
 #endif
+}
+
+/* ─── base-N plane codec (v8) ─────────────────────────────────────────────────
+ *
+ * Same block layout and sync rows as the packed-bit path; the only difference
+ * is that a block carries one base-`n_levels` digit instead of `bpp` bits.
+ *
+ * Per frame the caller guarantees blocks_x * blocks_y_data is a whole number
+ * of groups and that gbits * groups is a multiple of 8, so frames stay
+ * byte-aligned and threads never share a byte. For the shipping v8 luma
+ * profile that holds exactly: 960 * 538 = 516480 blocks = 43040 groups of 12,
+ * and 43040 * 19 = 817760 bits = 102220 bytes.
+ */
+EXPORT void encode_plane_basen(
+    const uint8_t *src,
+    uint64_t       bit_offset,
+    uint64_t       bit_stride,
+    uint8_t       *out,
+    int n_frames,
+    int plane_h,
+    int plane_w,
+    int block_size,
+    int blocks_x,
+    int blocks_y_data,
+    int sync_rows,
+    int n_levels,
+    int digits,
+    int gbits,
+    int n_threads
+) {
+    uint8_t lv[256];
+    build_levels_n(n_levels, lv);
+    const int frame_pixels = plane_h * plane_w;
+    const int per_frame    = blocks_x * blocks_y_data;
+    const int n_groups     = per_frame / digits;
+
+    OMP_FOR(n_threads)
+    for (int f = 0; f < n_frames; f++) {
+        uint8_t *frame = out + (size_t)f * frame_pixels;
+        uint64_t pos   = bit_offset + (uint64_t)f * bit_stride;
+
+        write_sync(frame, plane_w, block_size, blocks_x, sync_rows);
+
+        /* Expand this frame's groups into a digit run, then paint blocks. */
+        int gi = 0;                 /* groups consumed          */
+        int di = digits;            /* digits left in cur group */
+        uint64_t cur = 0;
+
+        for (int dy = 0; dy < blocks_y_data; dy++) {
+            int base_row = (sync_rows + dy) * block_size;
+            uint8_t *row0 = frame + (size_t)base_row * plane_w;
+
+            for (int bx = 0; bx < blocks_x; bx++) {
+                if (di == digits) {
+                    cur = (gi < n_groups) ? get_bits64(src, pos, gbits) : 0;
+                    pos += gbits;
+                    gi++;
+                    di = 0;
+                }
+                int d = (int)(cur % (unsigned)n_levels);
+                cur /= (unsigned)n_levels;
+                di++;
+                fill8(row0 + bx * block_size, lv[d], block_size);
+            }
+            for (int py = 1; py < block_size; py++)
+                copy8(frame + (size_t)(base_row + py) * plane_w, row0, plane_w);
+        }
+
+        int used_rows = (sync_rows + blocks_y_data) * block_size;
+        if (used_rows < plane_h)
+            fill8(frame + (size_t)used_rows * plane_w, 0,
+                  (size_t)(plane_h - used_rows) * plane_w);
+    }
+}
+
+/* `out` must start zeroed: groups are OR-ed in. */
+EXPORT void decode_plane_basen(
+    const uint8_t *frames,
+    uint8_t       *out,
+    uint64_t       bit_offset,
+    uint64_t       bit_stride,
+    int n_frames,
+    int plane_h,
+    int plane_w,
+    int block_size,
+    int blocks_x,
+    int blocks_y_data,
+    int sync_rows,
+    int n_levels,
+    int digits,
+    int gbits,
+    int margin,
+    int n_threads
+) {
+    const int frame_pixels = plane_h * plane_w;
+    const int inner        = block_size - 2 * margin;
+    const int inner_pixels = inner * inner;
+    const int per_frame    = blocks_x * blocks_y_data;
+    const int n_groups     = per_frame / digits;
+
+    OMP_FOR(n_threads)
+    for (int f = 0; f < n_frames; f++) {
+        const uint8_t *frame = frames + (size_t)f * frame_pixels;
+        uint64_t pos = bit_offset + (uint64_t)f * bit_stride;
+
+        int gi = 0, di = 0;
+        uint64_t cur = 0, place = 1;
+
+        for (int dy = 0; dy < blocks_y_data; dy++) {
+            int base_row = (sync_rows + dy) * block_size + margin;
+
+            for (int bx = 0; bx < blocks_x; bx++) {
+                int col = bx * block_size + margin;
+                int sum = 0;
+                for (int py = 0; py < inner; py++) {
+                    const uint8_t *r = frame + (size_t)(base_row + py) * plane_w + col;
+                    for (int px = 0; px < inner; px++) sum += r[px];
+                }
+                int d = slice_level_n(sum / inner_pixels, n_levels);
+
+                cur += (uint64_t)d * place;
+                place *= (unsigned)n_levels;
+                di++;
+
+                if (di == digits) {
+                    if (gi < n_groups) put_bits64(out, pos, gbits, cur);
+                    pos += gbits;
+                    gi++;
+                    di = 0;
+                    cur = 0;
+                    place = 1;
+                }
+            }
+        }
+    }
 }
