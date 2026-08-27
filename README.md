@@ -35,34 +35,44 @@
 | [`v6-parallel`](../../tree/v6-parallel) | v5 | sharding across concurrently uploaded videos, and a Windows executable |
 | [`v7-playlists`](../../tree/v7-playlists) | v5 | one playlist link per archive, a portable Docker image, faster archiving |
 | **`file_explorer`** (this one) | **v5** | a browsable file manager on top of v7, with encryption before upload |
+| [`v8-dense-audio`](../../tree/v8-dense-audio) | v8 | 3 levels per luma block instead of 2, and payload carried in the audio track |
 
-The frame format has not changed since v5 — a video encoded on
-`v5-max-throughput`, `v6-parallel`, `v7-playlists` or `file_explorer` decodes
-on all four. What the later branches add is everything around the format.
+v5 through `file_explorer` share one frame format — a video encoded on
+any of them decodes on all of them, and what those branches add is
+everything *around* the format. `v8-dense-audio` is the first change to
+the format itself since v5; it writes a different header, and readers
+from v5 onward handle both.
 
 ## What each version can and cannot do
 
 The same table appears on every branch. This one is **`file_explorer`**.
 
-| | `dev`<br>v3 | `optimization-v3`<br>v4 | `v5-max-`<br>`throughput` | `v6-parallel` | `v7-playlists` | `file_explorer` |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| Data per frame | 40,140 B | 64,200 B | 56,100 B | 56,100 B | 56,100 B | 56,100 B |
-| Recovers a file that really went through YouTube | untested | **no** | yes | yes | yes | **yes** |
-| Verified byte-identical at 1 GB | no | no | yes | yes | yes | **yes** |
-| Threaded, packed-bit pixel engine | no | no | yes | yes | yes | **yes** |
-| Native C Reed-Solomon (32x decode) | no | no | yes | yes | yes | **yes** |
-| Header in audio *and* description | no | no | yes | yes | yes | **yes** |
-| Selectable density profiles | no | no | yes | yes | yes | **yes** |
-| Archives larger than one video | no | no | no | yes | yes | **yes** |
-| One link for a split archive | no | no | no | no | yes | **yes** |
-| Windows executable | no | no | no | yes | yes | **yes** |
-| Docker image | no | no | no | no | yes | **yes** |
-| Browsable file manager | no | no | no | no | no | **yes** |
-| Encryption before upload | no | no | no | no | no | **yes** |
+| | `dev`<br>v3 | `optimization-v3`<br>v4 | `v5-max-`<br>`throughput` | `v6-parallel` | `v7-playlists` | `file_explorer` | `v8-dense-`<br>`audio` |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| Data per frame | 40,140 B | 64,200 B | 56,100 B | 56,100 B | 56,100 B | 56,100 B | 166,540 B |
+| Recovers a file that really went through YouTube | untested | **no** | yes | yes | yes | **yes** | probe only |
+| Verified byte-identical at 1 GB | no | no | yes | yes | yes | **yes** | local only |
+| Threaded, packed-bit pixel engine | no | no | yes | yes | yes | **yes** | yes |
+| Native C Reed-Solomon (32x decode) | no | no | yes | yes | yes | **yes** | yes |
+| Header in audio *and* description | no | no | yes | yes | yes | **yes** | yes |
+| Selectable density profiles | no | no | yes | yes | yes | **yes** | yes |
+| Archives larger than one video | no | no | no | yes | yes | **yes** | yes |
+| One link for a split archive | no | no | no | no | yes | **yes** | yes |
+| Windows executable | no | no | no | yes | yes | **yes** | yes |
+| Docker image | no | no | no | no | yes | **yes** | yes |
+| Browsable file manager | no | no | no | no | no | **yes** | yes |
+| Encryption before upload | no | no | no | no | no | **yes** | yes |
+| Level counts beyond powers of two | no | no | no | no | no | no | yes |
+| Payload carried in the audio track | no | no | no | no | no | no | yes |
 
 > "Verified byte-identical at 1 GB" means a single 1 GB video, uploaded to
 > YouTube and downloaded back. The **sharded** 1 GB path on `v6-parallel` and
 > later is not yet verified end to end — see *the error-correction margin*.
+>
+> `v8-dense-audio` is the exception and is marked accordingly. Its *format*
+> was chosen from a real YouTube upload, which measured the error rate of
+> every level count directly, but a complete v8 file has not yet made the
+> round trip through the service. Its 1 GB and 3 GB round trips are local.
 
 ### What this branch can do
 
@@ -79,9 +89,6 @@ The same table appears on every branch. This one is **`file_explorer`**.
 - **Preview files in the browser** — images, text, PDF, audio, video — by
   fetching and decoding on demand, with a local cache so the second look is
   instant.
-- **Handle files up to 5 GB**, measured: nine round trips from 10 MB to 5 GB,
-  every one byte-identical, at a flat 12-13 MB/s encode and 9.8 MB/s decode.
-  See *Scaling* below for the graph and the memory ceiling behind it.
 
 ### What it cannot do
 
@@ -93,10 +100,6 @@ The same table appears on every branch. This one is **`file_explorer`**.
 - **Serve several users.** The index is per-installation and unauthenticated —
   it assumes the localhost or private-network deployment the rest of the
   project assumes. Do not expose it to the internet as-is.
-- **Go much past 5 GB on a normal machine.** The pipeline holds whole archives
-  in memory as `bytes`, so a 5 GB payload peaks near 15 GB during decode. It
-  succeeded on 32 GB of RAM and would not on 16 GB. Streaming through a
-  temporary file is the fix and is not done.
 - Everything on v7's list still applies: the error-correction margin, the
   playlist scope, the daily upload quota, and software encoding in the
   container.
